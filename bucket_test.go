@@ -16,17 +16,14 @@ type mockRedis struct {
 }
 
 func (m *mockRedis) ZAdd(ctx context.Context, key, member string, score float64) error {
-	// TODO implement me
 	panic("implement me")
 }
 
 func (m *mockRedis) ZRem(ctx context.Context, key, member string) error {
-	// TODO implement me
 	panic("implement me")
 }
 
 func (m *mockRedis) ZRangeByScore(ctx context.Context, key string, minScore string, maxScore string) ([]string, error) {
-	// TODO implement me
 	panic("implement me")
 }
 
