@@ -124,12 +124,15 @@ func (i *Instance) registerInstance(ctx context.Context) error {
 	return nil
 }
 func (i *Instance) deRegisterInstance(ctx context.Context) error {
+	i.bucketsMux.Lock()
+	defer i.bucketsMux.Unlock()
 	if len(i.buckets) > 0 {
 		for _, bucket := range i.buckets {
 			if err := bucket.Unlock(); err != nil {
 				i.errorHandler(err.Error())
 			}
 		}
+		i.buckets = nil
 	}
 	if err := i.redis.ZRem(ctx, i.listKey, i.id); err != nil {
 		return fmt.Errorf("register instance: %w", err)
@@ -201,9 +204,11 @@ func (i *Instance) rebalance(ctx context.Context, targetBuckets []uint16) {
 
 	if len(i.buckets) == 0 {
 		for _, id := range targetBuckets {
-			newBuckets[id] = NewBucket(i.redis, i.redisPrefix, i.id, id, i.bucketLockTTL, i.debug, i.errorHandler)
+			id := id
+			b := NewBucket(i.redis, i.redisPrefix, i.id, id, i.bucketLockTTL, i.debug, i.errorHandler)
+			newBuckets[id] = b
 			wg.Go(func() {
-				i.lockBucket(ctx, newBuckets[id])
+				i.lockBucket(ctx, b)
 			})
 		}
 
@@ -217,6 +222,7 @@ func (i *Instance) rebalance(ctx context.Context, targetBuckets []uint16) {
 	}
 	for id := range i.buckets {
 		if _, ok := newBuckets[id]; !ok {
+			id := id
 			b := i.buckets[id]
 			wg.Go(func() {
 				i.unlockBucket(b)
@@ -225,9 +231,11 @@ func (i *Instance) rebalance(ctx context.Context, targetBuckets []uint16) {
 	}
 	for id := range newBuckets {
 		if _, ok := i.buckets[id]; !ok {
-			newBuckets[id] = NewBucket(i.redis, i.redisPrefix, i.id, id, i.bucketLockTTL, i.debug, i.errorHandler)
+			id := id
+			b := NewBucket(i.redis, i.redisPrefix, i.id, id, i.bucketLockTTL, i.debug, i.errorHandler)
+			newBuckets[id] = b
 			wg.Go(func() {
-				i.lockBucket(ctx, newBuckets[id])
+				i.lockBucket(ctx, b)
 			})
 		} else {
 			newBuckets[id] = i.buckets[id]
