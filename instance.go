@@ -196,8 +196,6 @@ func (i *Instance) rebalance(ctx context.Context, targetBuckets []uint16) {
 	i.bucketsMux.Lock()
 	defer i.bucketsMux.Unlock()
 
-	wg := sync.WaitGroup{}
-
 	newBuckets := make(map[uint16]*Bucket, len(targetBuckets))
 	for _, bucket := range targetBuckets {
 		newBuckets[bucket] = nil
@@ -208,13 +206,10 @@ func (i *Instance) rebalance(ctx context.Context, targetBuckets []uint16) {
 			id := id
 			b := NewBucket(i.redis, i.redisPrefix, i.id, id, i.bucketLockTTL, i.debug, i.errorHandler)
 			newBuckets[id] = b
-			wg.Go(func() {
-				i.lockBucket(b)
-			})
+			i.lockBucket(b)
 		}
 
 		i.buckets = newBuckets
-		wg.Wait()
 		return
 	}
 
@@ -225,25 +220,21 @@ func (i *Instance) rebalance(ctx context.Context, targetBuckets []uint16) {
 		if _, ok := newBuckets[id]; !ok {
 			id := id
 			b := i.buckets[id]
-			wg.Go(func() {
-				i.unlockBucket(b)
-			})
+			i.unlockBucket(b)
 		}
 	}
+
 	for id := range newBuckets {
 		if _, ok := i.buckets[id]; !ok {
 			id := id
 			b := NewBucket(i.redis, i.redisPrefix, i.id, id, i.bucketLockTTL, i.debug, i.errorHandler)
 			newBuckets[id] = b
-			wg.Go(func() {
-				i.lockBucket(b)
-			})
+			i.lockBucket(b)
 		} else {
 			newBuckets[id] = i.buckets[id]
 		}
 	}
 
-	wg.Wait()
 	i.buckets = newBuckets
 }
 
