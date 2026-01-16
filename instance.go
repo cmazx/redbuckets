@@ -8,6 +8,7 @@ import (
 	"log"
 	"maps"
 	"slices"
+	"strconv"
 	"sync"
 	"time"
 
@@ -247,6 +248,10 @@ func (i *Instance) rebalance(ctx context.Context, targetBuckets []uint16) {
 }
 
 func (i *Instance) targetBuckets() []uint16 {
+	// not yet registered
+	if i.lastInstancesCount == 0 {
+		return nil
+	}
 	if i.bucketsTotalCount < i.lastInstancesCount {
 		// buckets are not enough for the current instance
 		if i.lastInstanceIndex >= i.bucketsTotalCount {
@@ -273,7 +278,11 @@ func (i *Instance) targetBuckets() []uint16 {
 	return targetBuckets
 }
 func (i *Instance) refreshInstances(ctx context.Context) bool {
-	instances, err := i.redis.ZRangeByScore(ctx, i.listKey, "now-5s", "+inf")
+	instances, err := i.redis.ZRangeByScore(
+		ctx,
+		i.listKey,
+		strconv.FormatInt(time.Now().Add(-i.registerPeriod).Unix(), 10),
+		"+inf")
 	if err != nil {
 		i.errorHandler(fmt.Sprintf("check instance rebalance: %s", err.Error()))
 		return false
