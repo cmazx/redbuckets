@@ -58,7 +58,6 @@ func TestBucketLock(t *testing.T) {
 	tests := []struct {
 		name          string
 		mockSetup     func(m *mockRedis)
-		ctxTimeout    time.Duration
 		expectedError error
 		verify        func(t *testing.T, mock *mockRedis)
 	}{
@@ -67,7 +66,6 @@ func TestBucketLock(t *testing.T) {
 			mockSetup: func(m *mockRedis) {
 				m.setNxExErr = nil
 			},
-			ctxTimeout:    time.Second,
 			expectedError: nil,
 			verify: func(t *testing.T, mock *mockRedis) {
 				if mock.setNxExCalled != 1 {
@@ -84,7 +82,6 @@ func TestBucketLock(t *testing.T) {
 				m.keyStore["red-bucket1"] = "instance1"
 				m.setNxExErr = nil
 			},
-			ctxTimeout:    time.Second,
 			expectedError: nil,
 			verify: func(t *testing.T, mock *mockRedis) {
 				if mock.setNxExCalled != 1 {
@@ -97,7 +94,6 @@ func TestBucketLock(t *testing.T) {
 			mockSetup: func(m *mockRedis) {
 				m.setNxExErr = errors.New("redis failure")
 			},
-			ctxTimeout:    time.Second,
 			expectedError: nil,
 			verify: func(t *testing.T, mock *mockRedis) {
 				if mock.setNxExCalled != 1 {
@@ -115,10 +111,7 @@ func TestBucketLock(t *testing.T) {
 			}
 
 			bucket := NewBucket(mockRedis, "red", "instance1", 1, time.Second, func(s string) {}, func(s string) {})
-			ctx, cancel := context.WithTimeout(context.Background(), tt.ctxTimeout)
-			defer cancel()
-
-			err := bucket.Lock(ctx)
+			err := bucket.Lock()
 			if !errors.Is(err, tt.expectedError) {
 				t.Fatalf("expected error %v, got %v", tt.expectedError, err)
 			}

@@ -40,8 +40,8 @@ func (b *Bucket) Unlock() error {
 	return nil
 }
 
-func (b *Bucket) Lock(ctx context.Context) error {
-	b.lock(ctx)
+func (b *Bucket) Lock() error {
+	b.lock()
 
 	go func() {
 		ticker := time.NewTicker(time.Second)
@@ -49,22 +49,20 @@ func (b *Bucket) Lock(ctx context.Context) error {
 		for {
 			select {
 			case <-b.unlockCh:
-				ctx, cancel := context.WithTimeout(ctx, time.Second)
-				b.unlock(ctx)
-				cancel()
+				b.unlock()
 				b.unlockedCh <- struct{}{}
 				return
 			case <-ticker.C:
-				ctx, cancel := context.WithTimeout(ctx, time.Second)
-				b.lock(ctx)
-				cancel()
+				b.lock()
 			}
 		}
 	}()
 
 	return nil
 }
-func (b *Bucket) lock(ctx context.Context) {
+func (b *Bucket) lock() {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
 	if err := b.redis.SetNxEx(ctx, b.redisPrefix+strconv.Itoa(int(b.id)), b.instanceID, b.lockTTL); err != nil {
 		// still not unlocked by another bucket
 		if errors.Is(err, ErrRedisKeyExists) {
@@ -76,7 +74,9 @@ func (b *Bucket) lock(ctx context.Context) {
 	return
 }
 
-func (b *Bucket) unlock(ctx context.Context) {
+func (b *Bucket) unlock() {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
 	if err := b.redis.Rem(ctx, b.redisPrefix+strconv.Itoa(int(b.id))); err != nil {
 		b.errorHandler(err.Error())
 	}

@@ -209,7 +209,7 @@ func (i *Instance) rebalance(ctx context.Context, targetBuckets []uint16) {
 			b := NewBucket(i.redis, i.redisPrefix, i.id, id, i.bucketLockTTL, i.debug, i.errorHandler)
 			newBuckets[id] = b
 			wg.Go(func() {
-				i.lockBucket(ctx, b)
+				i.lockBucket(b)
 			})
 		}
 
@@ -236,7 +236,7 @@ func (i *Instance) rebalance(ctx context.Context, targetBuckets []uint16) {
 			b := NewBucket(i.redis, i.redisPrefix, i.id, id, i.bucketLockTTL, i.debug, i.errorHandler)
 			newBuckets[id] = b
 			wg.Go(func() {
-				i.lockBucket(ctx, b)
+				i.lockBucket(b)
 			})
 		} else {
 			newBuckets[id] = i.buckets[id]
@@ -302,8 +302,8 @@ func (i *Instance) refreshInstances(ctx context.Context) bool {
 	return true
 }
 
-func (i *Instance) lockBucket(ctx context.Context, bucket *Bucket) {
-	if err := bucket.Lock(ctx); err != nil {
+func (i *Instance) lockBucket(bucket *Bucket) {
+	if err := bucket.Lock(); err != nil {
 		i.errorHandler(fmt.Sprintf("remove bucket: unlock bucket %d: %s", bucket.id, err.Error()))
 	}
 }
