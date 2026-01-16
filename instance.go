@@ -22,6 +22,7 @@ type Instance struct {
 	bucketsMux         sync.RWMutex
 	listKey            string
 	registerTimeout    time.Duration
+	rangeTimeout       time.Duration
 	registerPeriod     time.Duration
 	errorHandler       func(string)
 	debug              func(string)
@@ -93,7 +94,8 @@ func NewInstance(redis Redis, listKey string, options ...Options) (*Instance, er
 		errorHandler:      func(str string) { log.Println("red buckets error: " + str) },
 		debug:             func(str string) {},
 		registerPeriod:    time.Second,
-		registerTimeout:   time.Second * 2,
+		registerTimeout:   time.Second * 3,
+		rangeTimeout:      time.Second * 3,
 		bucketLockTTL:     time.Second * 10,
 		bucketsTotalCount: 1024,
 		redisPrefix:       "red-buckets",
@@ -142,14 +144,14 @@ func (i *Instance) deRegisterInstance(ctx context.Context) error {
 }
 func (i *Instance) Run(ctx context.Context) error {
 	// try to register to find problems earlier
-	ctx, cancel := context.WithTimeout(ctx, i.registerTimeout)
+	registerCtx, cancel := context.WithTimeout(ctx, i.registerTimeout)
 	defer cancel()
-	if err := i.registerInstance(ctx); err != nil {
+	if err := i.registerInstance(registerCtx); err != nil {
 		return fmt.Errorf("register instance: %w", err)
 	}
 
 	i.refreshInstances(ctx)
-	i.rebalance(ctx, i.targetBuckets())
+	i.rebalance(i.targetBuckets())
 	// register/refresh cycle
 	i.wg.Go(func() {
 		t := time.NewTicker(i.registerPeriod)
@@ -158,20 +160,20 @@ func (i *Instance) Run(ctx context.Context) error {
 			select {
 			case <-i.stop:
 				t.Stop()
-				ctx, cancel := context.WithTimeout(ctx, i.registerTimeout*2)
-				if err := i.deRegisterInstance(ctx); err != nil {
+				registerCtx, cancel := context.WithTimeout(ctx, i.registerTimeout*2)
+				if err := i.deRegisterInstance(registerCtx); err != nil {
 					i.errorHandler(fmt.Sprintf("de-register instance: %s", err.Error()))
 				}
 				cancel()
 				return
 			case <-t.C:
-				ctx, cancel := context.WithTimeout(ctx, i.registerTimeout)
-				if err := i.registerInstance(ctx); err != nil {
+				registerCtx, cancel := context.WithTimeout(ctx, i.registerTimeout)
+				if err := i.registerInstance(registerCtx); err != nil {
 					i.errorHandler(fmt.Sprintf("register instance: %s", err.Error()))
 				}
 				cancel()
 				if i.refreshInstances(ctx) {
-					i.rebalance(ctx, i.targetBuckets())
+					i.rebalance(i.targetBuckets())
 					t.Reset(i.registerPeriod)
 				}
 			}
@@ -189,7 +191,7 @@ func (i *Instance) Stop() {
 	i.debug("stopped instance")
 }
 
-func (i *Instance) rebalance(ctx context.Context, targetBuckets []uint16) {
+func (i *Instance) rebalance(targetBuckets []uint16) {
 	i.debug("*rebalance to " + fmt.Sprintf("%v", targetBuckets))
 	defer i.debug("*rebalance completed*")
 
@@ -269,6 +271,8 @@ func (i *Instance) targetBuckets() []uint16 {
 	return targetBuckets
 }
 func (i *Instance) refreshInstances(ctx context.Context) bool {
+	ctx, cancel := context.WithTimeout(ctx, i.rangeTimeout)
+	defer cancel()
 	instances, err := i.redis.ZRangeByScore(
 		ctx,
 		i.listKey,
