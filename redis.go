@@ -14,4 +14,5 @@ type Redis interface {
 	ZRangeByScore(ctx context.Context, key string, minScore string, maxScore string) ([]string, error)
 	SetNxEx(ctx context.Context, key string, value string, ttl time.Duration) (bool, error)
 	Rem(ctx context.Context, key string) error
+	Expire(ctx context.Context, s string, ttl time.Duration) error
 }

@@ -3,6 +3,7 @@ package redbuckets
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -59,6 +60,15 @@ func (m *RedisMock) ZRangeByScore(ctx context.Context, key string, minScore stri
 	return members, nil
 }
 
+func (m *RedisMock) Expire(_ context.Context, key string, ttl time.Duration) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.keys[key]; exists {
+		m.keys[key] = time.Now().Add(ttl)
+		return nil
+	}
+	return fmt.Errorf("key not found: %s", key)
+}
 func (m *RedisMock) SetNxEx(ctx context.Context, key string, value string, ttl time.Duration) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

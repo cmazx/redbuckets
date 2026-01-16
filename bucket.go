@@ -53,7 +53,8 @@ func (b *Bucket) Lock() error {
 				b.unlockedCh <- struct{}{}
 				return
 			case <-ticker.C:
-				b.lock()
+				b.refreshExpiration()
+				ticker.Reset(time.Second)
 			}
 		}
 	}()
@@ -70,6 +71,18 @@ func (b *Bucket) lock() {
 	}
 	if !success {
 		b.errorHandler(fmt.Sprintf("bucket %d already locked", b.id))
+	}
+
+	return
+}
+func (b *Bucket) refreshExpiration() {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	if err := b.redis.Expire(ctx, b.redisPrefix+strconv.Itoa(int(b.id)), b.lockTTL); err != nil {
+		b.errorHandler(err.Error())
+		b.lock() // try to lock
+		return
 	}
 
 	return

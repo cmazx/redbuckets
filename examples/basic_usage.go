@@ -15,13 +15,20 @@ type RedisMock struct {
 	keys      map[string]time.Time
 }
 
-func (r RedisMock) SetNxEx(ctx context.Context, key string, value string, ttl time.Duration) error {
+func (r RedisMock) SetNxEx(ctx context.Context, key string, value string, ttl time.Duration) (bool, error) {
 	val, ok := r.keys[key]
 	if !ok || val.Before(time.Now()) {
 		r.keys[key] = time.Now().Add(ttl)
-		return nil
+		return true, nil
 	}
-	return redbuckets.ErrRedisKeyExists
+	return false, nil
+}
+func (r RedisMock) Expire(_ context.Context, s string, ttl time.Duration) error {
+	_, ok := r.keys[s]
+	if ok {
+		r.keys[s] = time.Now().Add(ttl)
+	}
+	return nil
 }
 
 func (r RedisMock) Rem(ctx context.Context, key string) error {
