@@ -2,7 +2,7 @@ package redbuckets
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"strconv"
 	"time"
 )
@@ -63,12 +63,13 @@ func (b *Bucket) Lock() error {
 func (b *Bucket) lock() {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if err := b.redis.SetNxEx(ctx, b.redisPrefix+strconv.Itoa(int(b.id)), b.instanceID, b.lockTTL); err != nil {
-		// still not unlocked by another bucket
-		if errors.Is(err, ErrRedisKeyExists) {
-			return
-		}
+	success, err := b.redis.SetNxEx(ctx, b.redisPrefix+strconv.Itoa(int(b.id)), b.instanceID, b.lockTTL)
+	if err != nil {
 		b.errorHandler(err.Error())
+		return
+	}
+	if !success {
+		b.errorHandler(fmt.Sprintf("bucket %d already locked", b.id))
 	}
 
 	return

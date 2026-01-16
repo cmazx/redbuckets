@@ -33,16 +33,16 @@ func newMockRedis() *mockRedis {
 	}
 }
 
-func (m *mockRedis) SetNxEx(ctx context.Context, key string, value string, ttl time.Duration) error {
+func (m *mockRedis) SetNxEx(ctx context.Context, key string, value string, ttl time.Duration) (bool, error) {
 	m.setNxExCalled++
 	if m.setNxExErr != nil {
-		return m.setNxExErr
+		return false, m.setNxExErr
 	}
 	if _, exists := m.keyStore[key]; exists {
-		return ErrRedisKeyExists
+		return false, nil
 	}
 	m.keyStore[key] = value
-	return nil
+	return true, nil
 }
 
 func (m *mockRedis) Rem(ctx context.Context, key string) error {

@@ -59,14 +59,14 @@ func (m *RedisMock) ZRangeByScore(ctx context.Context, key string, minScore stri
 	return members, nil
 }
 
-func (m *RedisMock) SetNxEx(ctx context.Context, key string, value string, ttl time.Duration) error {
+func (m *RedisMock) SetNxEx(ctx context.Context, key string, value string, ttl time.Duration) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, exists := m.keys[key]; exists {
-		return ErrRedisKeyExists
+		return false, nil
 	}
 	m.keys[key] = time.Now().Add(ttl)
-	return nil
+	return true, nil
 }
 
 func (m *RedisMock) Rem(ctx context.Context, key string) error {
