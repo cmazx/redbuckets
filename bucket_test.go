@@ -48,7 +48,7 @@ func (m *mockRedis) SetNxEx(ctx context.Context, key string, value string, ttl t
 func (m *mockRedis) Expire(ctx context.Context, s string, ttl time.Duration) error {
 	return nil
 }
-func (m *mockRedis) Rem(ctx context.Context, key string) error {
+func (m *mockRedis) Delete(ctx context.Context, key string) error {
 	m.remCalled++
 	if m.remErr != nil {
 		return m.remErr

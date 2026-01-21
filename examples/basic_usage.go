@@ -31,7 +31,7 @@ func (r RedisMock) Expire(_ context.Context, s string, ttl time.Duration) error 
 	return nil
 }
 
-func (r RedisMock) Rem(ctx context.Context, key string) error {
+func (r RedisMock) Delete(ctx context.Context, key string) error {
 	delete(r.keys, key)
 	return nil
 }

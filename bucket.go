@@ -91,7 +91,7 @@ func (b *Bucket) refreshExpiration() {
 func (b *Bucket) unlock() {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if err := b.redis.Rem(ctx, b.redisPrefix+strconv.Itoa(int(b.id))); err != nil {
+	if err := b.redis.Delete(ctx, b.redisPrefix+strconv.Itoa(int(b.id))); err != nil {
 		b.errorHandler(err.Error())
 	}
 }

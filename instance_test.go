@@ -79,7 +79,7 @@ func (m *RedisMock) SetNxEx(ctx context.Context, key string, value string, ttl t
 	return true, nil
 }
 
-func (m *RedisMock) Rem(ctx context.Context, key string) error {
+func (m *RedisMock) Delete(ctx context.Context, key string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.keys, key)
