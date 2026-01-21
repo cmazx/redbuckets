@@ -121,6 +121,8 @@ func (i *Instance) Buckets() iter.Seq[uint16] {
 }
 
 func (i *Instance) registerInstance(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, i.registerTimeout)
+	defer cancel()
 	if err := i.redis.ZAdd(ctx, i.listKey, i.id, float64(time.Now().Unix())); err != nil {
 		return fmt.Errorf("register instance: %w", err)
 	}
@@ -143,15 +145,13 @@ func (i *Instance) deRegisterInstance(ctx context.Context) error {
 	return nil
 }
 func (i *Instance) Run(ctx context.Context) error {
-	// try to register to find problems earlier
-	registerCtx, cancel := context.WithTimeout(ctx, i.registerTimeout)
-	defer cancel()
-	if err := i.registerInstance(registerCtx); err != nil {
+	// first registration and rebalance
+	if err := i.registerInstance(ctx); err != nil {
 		return fmt.Errorf("register instance: %w", err)
 	}
-
 	i.refreshInstances(ctx)
 	i.rebalance(i.targetBuckets())
+
 	// register/refresh cycle
 	i.wg.Go(func() {
 		t := time.NewTicker(i.registerPeriod)
@@ -160,18 +160,16 @@ func (i *Instance) Run(ctx context.Context) error {
 			select {
 			case <-i.stop:
 				t.Stop()
-				registerCtx, cancel := context.WithTimeout(ctx, i.registerTimeout*2)
+				registerCtx, cancel := context.WithTimeout(context.Background(), i.registerTimeout*2)
 				if err := i.deRegisterInstance(registerCtx); err != nil {
 					i.errorHandler(fmt.Sprintf("de-register instance: %s", err.Error()))
 				}
 				cancel()
 				return
 			case <-t.C:
-				registerCtx, cancel := context.WithTimeout(ctx, i.registerTimeout)
-				if err := i.registerInstance(registerCtx); err != nil {
+				if err := i.registerInstance(ctx); err != nil {
 					i.errorHandler(fmt.Sprintf("register instance: %s", err.Error()))
 				}
-				cancel()
 				if i.refreshInstances(ctx) {
 					i.rebalance(i.targetBuckets())
 					t.Reset(i.registerPeriod)
