@@ -41,7 +41,9 @@ func WithDebug(debug func(string)) Options {
 }
 func WithErrorHandler(errorHandler func(string)) Options {
 	return func(i *Instance) {
-		i.errorHandler = errorHandler
+		i.errorHandler = func(s string) {
+			errorHandler("i" + i.id + " " + s)
+		}
 	}
 }
 func WithRegisterPeriod(registerPeriod time.Duration) Options {

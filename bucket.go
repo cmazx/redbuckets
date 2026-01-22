@@ -18,6 +18,8 @@ type Bucket struct {
 	redisPrefix  string
 	locked       bool
 	mutex        sync.Mutex
+	unlockCh     chan struct{}
+	unlockedCh   chan struct{}
 }
 
 func NewBucket(redis Redis, redisPrefix string, instanceID string, id uint16, ttl time.Duration,
@@ -30,6 +32,8 @@ func NewBucket(redis Redis, redisPrefix string, instanceID string, id uint16, tt
 		lockTTL:      ttl,
 		instanceID:   instanceID,
 		redisPrefix:  redisPrefix,
+		unlockCh:     make(chan struct{}, 1),
+		unlockedCh:   make(chan struct{}, 1),
 	}
 }
 
@@ -47,6 +51,9 @@ func (b *Bucket) LockAndKeep(ctx context.Context) error {
 		ticker := time.NewTicker(time.Second)
 		for {
 			select {
+			case <-b.unlockCh:
+				ticker.Stop()
+				return
 			case <-ctx.Done():
 				ticker.Stop()
 				return
@@ -56,6 +63,7 @@ func (b *Bucket) LockAndKeep(ctx context.Context) error {
 			}
 		}
 	}()
+	b.unlockedCh <- struct{}{}
 
 	return nil
 }
@@ -107,6 +115,8 @@ func (b *Bucket) Unlock() error {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
 	b.locked = false
+	b.unlockCh <- struct{}{}
+	<-b.unlockedCh
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if err := b.redis.Delete(ctx, b.getRedisKey()); err != nil {
