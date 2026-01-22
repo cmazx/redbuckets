@@ -225,15 +225,19 @@ func TestRun(t *testing.T) {
 			}
 
 			// Run the instance
-			ctx := context.Background()
-			err = inst.Run(ctx)
-
-			// Check for expected errors during Run
-			if tc.expectError && err == nil {
-				t.Fatal("expected an error, but got none")
-			} else if !tc.expectError && err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
+			ctx, cancel := context.WithCancel(context.Background())
+			wg := sync.WaitGroup{}
+			wg.Go(func() {
+				err = inst.Run(ctx)
+				// Check for expected errors during Run
+				if tc.expectError && err == nil {
+					t.Error("expected an error, but got none")
+					return
+				} else if !tc.expectError && err != nil {
+					t.Errorf("unexpected error: %v", err)
+					return
+				}
+			})
 
 			if tc.checkDuringRun != nil {
 				// Give it a bit of time to register and rebalance
@@ -247,8 +251,8 @@ func TestRun(t *testing.T) {
 			if tc.stopTimeout > 0 {
 				time.Sleep(tc.stopTimeout)
 			}
-			inst.Stop()
-
+			cancel()
+			wg.Wait()
 			// Run afterRun checks
 			if tc.checkAfterRun != nil {
 				if err := tc.checkAfterRun(inst, redis); err != nil {

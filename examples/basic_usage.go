@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/cmazx/redbuckets"
@@ -60,25 +61,34 @@ func (r RedisMock) ZRangeByScore(_ context.Context, key string, minScore string,
 func main() {
 	redis := &RedisMock{instances: make(map[string]float64), keys: make(map[string]time.Time)}
 	svc := initService(redis, "first")
-	ctx := context.Background()
-	if err := svc.Run(ctx); err != nil {
-		log.Fatal(err)
-	}
+	ctx, cancel := context.WithCancel(context.Background())
+	wg := sync.WaitGroup{}
+	wg.Go(func() {
+		if err := svc.Run(ctx); err != nil {
+			log.Fatal(err)
+		}
+	})
 	<-time.After(time.Second * 10)
 
 	log.Println("Starting second service.....")
 
 	// second service
 	svc2 := initService(redis, "second")
-	if err := svc2.Run(ctx); err != nil {
-		log.Fatal(err)
-	}
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	wg2 := sync.WaitGroup{}
+	wg2.Go(func() {
+		if err := svc2.Run(ctx2); err != nil {
+			log.Fatal(err)
+		}
+	})
 	<-time.After(time.Second * 10)
-	log.Println("Stopping first service.....")
 
-	svc.Stop()
+	log.Println("Stopping first service.....")
+	cancel()
+	wg.Wait()
 	<-time.After(time.Second * 10)
-	svc2.Stop()
+	cancel2()
+	wg2.Wait()
 	<-time.After(time.Second * 10)
 	log.Println("Stopping second service.....")
 }

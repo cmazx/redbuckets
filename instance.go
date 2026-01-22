@@ -4,9 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"iter"
 	"log"
-	"maps"
 	"slices"
 	"strconv"
 	"sync"
@@ -22,6 +20,7 @@ type Instance struct {
 	bucketsMux         sync.RWMutex
 	listKey            string
 	registerTimeout    time.Duration
+	unRegisterTimeout  time.Duration
 	rangeTimeout       time.Duration
 	registerPeriod     time.Duration
 	errorHandler       func(string)
@@ -54,6 +53,11 @@ func WithRegisterPeriod(registerPeriod time.Duration) Options {
 func WithRegisterTimeout(registerTimeout time.Duration) Options {
 	return func(i *Instance) {
 		i.registerTimeout = registerTimeout
+	}
+}
+func WithUnRegisterTimeout(timeout time.Duration) Options {
+	return func(i *Instance) {
+		i.unRegisterTimeout = timeout
 	}
 }
 func WithBucketLockTTL(ttl time.Duration) Options {
@@ -90,11 +94,11 @@ func NewInstance(redis Redis, listKey string, options ...Options) (*Instance, er
 		id:                uuid.New().String(),
 		buckets:           make(map[uint16]*Bucket),
 		wg:                &sync.WaitGroup{},
-		stop:              make(chan struct{}, 1),
 		errorHandler:      func(str string) { log.Println("red buckets error: " + str) },
 		debug:             func(str string) {},
 		registerPeriod:    time.Second,
 		registerTimeout:   time.Second * 3,
+		unRegisterTimeout: time.Second * 10,
 		rangeTimeout:      time.Second * 3,
 		bucketLockTTL:     time.Second * 10,
 		bucketsTotalCount: 1024,
@@ -107,6 +111,9 @@ func NewInstance(redis Redis, listKey string, options ...Options) (*Instance, er
 	if inst.bucketsTotalCount < 1 {
 		return nil, errors.New("bucket count couldn't be less than 1")
 	}
+	if inst.bucketLockTTL < time.Second*2 {
+		return nil, errors.New("bucket lock ttl couldn't be less than 2 seconds")
+	}
 
 	return inst, nil
 }
@@ -114,10 +121,16 @@ func NewInstance(redis Redis, listKey string, options ...Options) (*Instance, er
 func (i *Instance) ID() string {
 	return i.id
 }
-func (i *Instance) Buckets() iter.Seq[uint16] {
+func (i *Instance) Buckets() []uint16 {
 	i.bucketsMux.RLock()
 	defer i.bucketsMux.RUnlock()
-	return maps.Keys(i.buckets)
+	lockedBuckets := make([]uint16, len(i.buckets))
+	for _, bucket := range i.buckets {
+		if bucket.IsLocked() {
+			lockedBuckets = append(lockedBuckets, bucket.id)
+		}
+	}
+	return lockedBuckets
 }
 
 func (i *Instance) registerInstance(ctx context.Context) error {
@@ -128,13 +141,13 @@ func (i *Instance) registerInstance(ctx context.Context) error {
 	}
 	return nil
 }
-func (i *Instance) deRegisterInstance(ctx context.Context) error {
+func (i *Instance) unRegisterInstance(ctx context.Context) error {
 	i.bucketsMux.Lock()
 	defer i.bucketsMux.Unlock()
 	if len(i.buckets) > 0 {
 		for _, bucket := range i.buckets {
 			if err := bucket.Unlock(); err != nil {
-				i.errorHandler(err.Error())
+				i.errorHandler(fmt.Sprintf("remove bucket: unlock bucket %d: %s", bucket.id, err.Error()))
 			}
 		}
 		i.buckets = nil
@@ -150,46 +163,33 @@ func (i *Instance) Run(ctx context.Context) error {
 		return fmt.Errorf("register instance: %w", err)
 	}
 	i.refreshInstances(ctx)
-	i.rebalance(i.targetBuckets())
+	i.rebalance(ctx, i.targetBuckets())
 
-	// register/refresh cycle
-	i.wg.Go(func() {
-		t := time.NewTicker(i.registerPeriod)
-		defer t.Stop()
-		for {
-			select {
-			case <-i.stop:
-				t.Stop()
-				registerCtx, cancel := context.WithTimeout(context.Background(), i.registerTimeout*2)
-				if err := i.deRegisterInstance(registerCtx); err != nil {
-					i.errorHandler(fmt.Sprintf("de-register instance: %s", err.Error()))
-				}
-				cancel()
-				return
-			case <-t.C:
-				if err := i.registerInstance(ctx); err != nil {
-					i.errorHandler(fmt.Sprintf("register instance: %s", err.Error()))
-				}
-				if i.refreshInstances(ctx) {
-					i.rebalance(i.targetBuckets())
-					t.Reset(i.registerPeriod)
-				}
+	t := time.NewTicker(i.registerPeriod)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			registerCtx, cancel := context.WithTimeout(ctx, i.unRegisterTimeout)
+			if err := i.unRegisterInstance(registerCtx); err != nil {
+				i.errorHandler(fmt.Sprintf("de-register instance: %s", err.Error()))
+			}
+			cancel()
+			return nil
+		case <-t.C:
+			if err := i.registerInstance(ctx); err != nil {
+				i.errorHandler(fmt.Sprintf("register instance: %s", err.Error()))
+			}
+			if i.refreshInstances(ctx) {
+				i.rebalance(ctx, i.targetBuckets())
+				t.Reset(i.registerPeriod)
 			}
 		}
-	})
-
-	return nil
+	}
 }
 
-func (i *Instance) Stop() {
-	i.debug("stopping instance")
-	i.stop <- struct{}{}
-	i.debug("waiting for instance to stop")
-	i.wg.Wait()
-	i.debug("stopped instance")
-}
-
-func (i *Instance) rebalance(targetBuckets []uint16) {
+func (i *Instance) rebalance(ctx context.Context, targetBuckets []uint16) {
 	i.debug("*rebalance to " + fmt.Sprintf("%v", targetBuckets))
 	defer i.debug("*rebalance completed*")
 
@@ -206,7 +206,10 @@ func (i *Instance) rebalance(targetBuckets []uint16) {
 			id := id
 			b := NewBucket(i.redis, i.redisPrefix, i.id, id, i.bucketLockTTL, i.debug, i.errorHandler)
 			newBuckets[id] = b
-			i.lockBucket(b)
+			// allow to get error due bucket could not be freed by other instance yet
+			if err := b.LockAndKeep(ctx); err != nil {
+				i.errorHandler(fmt.Sprintf("remove bucket: unlock bucket %d: %s", b.id, err.Error()))
+			}
 		}
 
 		i.buckets = newBuckets
@@ -219,8 +222,11 @@ func (i *Instance) rebalance(targetBuckets []uint16) {
 	for id := range i.buckets {
 		if _, ok := newBuckets[id]; !ok {
 			id := id
-			b := i.buckets[id]
-			i.unlockBucket(b)
+			bucket := i.buckets[id]
+			// in case unlock failed it just expire after some time
+			if err := bucket.Unlock(); err != nil {
+				i.errorHandler(fmt.Sprintf("remove bucket: unlock bucket %d: %s", bucket.id, err.Error()))
+			}
 		}
 	}
 
@@ -229,7 +235,9 @@ func (i *Instance) rebalance(targetBuckets []uint16) {
 			id := id
 			b := NewBucket(i.redis, i.redisPrefix, i.id, id, i.bucketLockTTL, i.debug, i.errorHandler)
 			newBuckets[id] = b
-			i.lockBucket(b)
+			if err := b.LockAndKeep(ctx); err != nil {
+				i.errorHandler(fmt.Sprintf("remove bucket: unlock bucket %d: %s", b.id, err.Error()))
+			}
 		} else {
 			newBuckets[id] = i.buckets[id]
 		}
@@ -293,16 +301,4 @@ func (i *Instance) refreshInstances(ctx context.Context) bool {
 	i.lastInstancesCount = len(instances)
 
 	return true
-}
-
-func (i *Instance) lockBucket(bucket *Bucket) {
-	if err := bucket.Lock(); err != nil {
-		i.errorHandler(fmt.Sprintf("remove bucket: unlock bucket %d: %s", bucket.id, err.Error()))
-	}
-}
-
-func (i *Instance) unlockBucket(bucket *Bucket) {
-	if err := bucket.Unlock(); err != nil {
-		i.errorHandler(fmt.Sprintf("remove bucket: unlock bucket %d: %s", bucket.id, err.Error()))
-	}
 }
