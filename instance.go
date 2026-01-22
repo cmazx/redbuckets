@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"slices"
 	"strconv"
 	"sync"
@@ -94,7 +93,7 @@ func NewInstance(redis Redis, listKey string, options ...Options) (*Instance, er
 		id:                uuid.New().String(),
 		buckets:           make(map[uint16]*Bucket),
 		wg:                &sync.WaitGroup{},
-		errorHandler:      func(str string) { log.Println("red buckets error: " + str) },
+		errorHandler:      func(str string) {},
 		debug:             func(str string) {},
 		registerPeriod:    time.Second,
 		registerTimeout:   time.Second * 3,

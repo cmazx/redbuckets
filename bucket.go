@@ -71,7 +71,7 @@ func (b *Bucket) lock(internalLock bool) {
 		return
 	}
 	if !success {
-		b.errorHandler(fmt.Sprintf("bucket %d already locked", b.id))
+		b.debug(fmt.Sprintf("bucket %d already locked", b.id))
 	}
 	b.locked = true
 
