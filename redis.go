@@ -2,11 +2,8 @@ package redbuckets
 
 import (
 	"context"
-	"errors"
 	"time"
 )
-
-var ErrRedisKeyExists = errors.New("ErrRedisKeyExists")
 
 type Redis interface {
 	ZAdd(ctx context.Context, key, member string, score float64) error
