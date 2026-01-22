@@ -13,8 +13,6 @@ type Bucket struct {
 	instanceID   string
 	debug        func(string)
 	errorHandler func(string)
-	unlockCh     chan struct{}
-	unlockedCh   chan struct{}
 	redis        Redis
 	lockTTL      time.Duration
 	redisPrefix  string
@@ -28,8 +26,6 @@ func NewBucket(redis Redis, redisPrefix string, instanceID string, id uint16, tt
 		redis:        redis,
 		debug:        debug,
 		errorHandler: errorHandler,
-		unlockCh:     make(chan struct{}, 1),
-		unlockedCh:   make(chan struct{}, 1),
 		lockTTL:      ttl,
 		instanceID:   instanceID,
 		redisPrefix:  redisPrefix,
@@ -72,6 +68,7 @@ func (b *Bucket) lock(internalLock bool) {
 	}
 	if !success {
 		b.debug(fmt.Sprintf("bucket %d already locked", b.id))
+		return
 	}
 	b.locked = true
 
@@ -105,12 +102,12 @@ func (b *Bucket) getRedisKey() string {
 func (b *Bucket) Unlock() error {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
+	b.locked = false
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if err := b.redis.Delete(ctx, b.getRedisKey()); err != nil {
 		return fmt.Errorf("delete bucket lock key: %w", err)
 	}
-	b.locked = false
 	return nil
 }
 
