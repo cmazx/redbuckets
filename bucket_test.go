@@ -3,7 +3,6 @@ package redbuckets
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -66,7 +65,6 @@ func (m *mockRedis) Expire(ctx context.Context, key string, ttl time.Duration) e
 	defer m.mutex.Unlock()
 	if v, ok := m.keyStore[key]; ok {
 		v.expireAt = time.Now().Add(ttl)
-		fmt.Println("key", key, "expireAt", m.keyStore[key].expireAt)
 		return nil
 	}
 	return errors.New("key not found " + key)

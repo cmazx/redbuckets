@@ -171,7 +171,7 @@ func (i *Instance) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			t.Stop()
-			registerCtx, cancel := context.WithTimeout(ctx, i.unRegisterTimeout)
+			registerCtx, cancel := context.WithTimeout(context.Background(), i.unRegisterTimeout)
 			if err := i.unRegisterInstance(registerCtx); err != nil {
 				i.errorHandler(fmt.Sprintf("de-register instance: %s", err.Error()))
 			}
