@@ -214,9 +214,9 @@ func (i *Instance) rebalance(ctx context.Context, targetBuckets []uint16) {
 		for _, id := range targetBuckets {
 			id := id
 			b := NewBucket(i.redis, i.redisPrefix, i.id, id, i.bucketLockTTL, func(s string) {
-				i.debug("b" + strconv.Itoa(int(i.buckets[id].id)) + ": " + s)
+				i.debug("b" + strconv.Itoa(int(id)) + ": " + s)
 			}, func(s string) {
-				i.errorHandler("b" + strconv.Itoa(int(i.buckets[id].id)) + ": " + s)
+				i.errorHandler("b" + strconv.Itoa(int(id)) + ": " + s)
 			})
 			newBuckets[id] = b
 			// allow to get error due bucket could not be freed by other instance yet
@@ -248,9 +248,9 @@ func (i *Instance) rebalance(ctx context.Context, targetBuckets []uint16) {
 		if _, ok := i.buckets[id]; !ok { // 3
 			id := id
 			b := NewBucket(i.redis, i.redisPrefix, i.id, id, i.bucketLockTTL, func(s string) {
-				i.debug("b" + strconv.Itoa(int(i.buckets[id].id)) + ": " + s)
+				i.debug("b" + strconv.Itoa(int(id)) + ": " + s)
 			}, func(s string) {
-				i.errorHandler("b" + strconv.Itoa(int(i.buckets[id].id)) + ": " + s)
+				i.errorHandler("b" + strconv.Itoa(int(id)) + ": " + s)
 			})
 			newBuckets[id] = b
 			if err := b.LockAndKeep(ctx); err != nil {
