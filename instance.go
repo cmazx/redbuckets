@@ -131,6 +131,11 @@ func (i *Instance) Buckets() []uint16 {
 	}
 	return lockedBuckets
 }
+func (i *Instance) BucketFulfillment() int {
+	i.bucketsMux.RLock()
+	defer i.bucketsMux.RUnlock()
+	return len(i.Buckets()) / len(i.buckets)
+}
 
 func (i *Instance) registerInstance(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, i.registerTimeout)
