@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -53,10 +54,28 @@ func (m *RedisMock) ZRem(ctx context.Context, key, member string) error {
 func (m *RedisMock) ZRangeByScore(ctx context.Context, key string, minScore string, maxScore string) ([]string, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	var members []string
-	for member := range m.instances {
-		members = append(members, member)
+	type item struct {
+		member string
+		score  float64
 	}
+	items := make([]item, 0, len(m.instances))
+	for member, score := range m.instances {
+		items = append(items, item{member: member, score: score})
+	}
+	slices.SortFunc(items, func(a, b item) int {
+		if a.score < b.score {
+			return -1
+		}
+		if a.score > b.score {
+			return 1
+		}
+		return 0
+	})
+	members := make([]string, 0, len(items))
+	for _, it := range items {
+		members = append(members, it.member)
+	}
+
 	return members, nil
 }
 

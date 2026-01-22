@@ -296,6 +296,7 @@ func (i *Instance) refreshInstances(ctx context.Context) bool {
 		i.errorHandler(fmt.Sprintf("check instance rebalance: %s", err.Error()))
 		return false
 	}
+	slices.Sort(instances)
 	currentIndex := slices.Index(instances, i.id)
 	if currentIndex == -1 {
 		i.errorHandler(fmt.Sprintf("check instance rebalance: current instance id not found! %s", i.id))
