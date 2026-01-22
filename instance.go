@@ -123,7 +123,7 @@ func (i *Instance) ID() string {
 func (i *Instance) Buckets() []uint16 {
 	i.bucketsMux.RLock()
 	defer i.bucketsMux.RUnlock()
-	lockedBuckets := make([]uint16, len(i.buckets))
+	lockedBuckets := make([]uint16, 0, len(i.buckets))
 	for _, bucket := range i.buckets {
 		if bucket.IsLocked() {
 			lockedBuckets = append(lockedBuckets, bucket.id)
@@ -134,10 +134,11 @@ func (i *Instance) Buckets() []uint16 {
 func (i *Instance) BucketFulfillment() int {
 	i.bucketsMux.RLock()
 	defer i.bucketsMux.RUnlock()
-	if len(i.buckets) == 0 {
+	bucketsCount := len(i.buckets)
+	if bucketsCount == 0 {
 		return 100
 	}
-	return len(i.Buckets()) / len(i.buckets)
+	return (len(i.Buckets()) * 100) / bucketsCount
 }
 
 func (i *Instance) registerInstance(ctx context.Context) error {
