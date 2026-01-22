@@ -20,7 +20,8 @@ type Bucket struct {
 	mutex        sync.Mutex
 }
 
-func NewBucket(redis Redis, redisPrefix string, instanceID string, id uint16, ttl time.Duration, debug func(string), errorHandler func(string)) *Bucket {
+func NewBucket(redis Redis, redisPrefix string, instanceID string, id uint16, ttl time.Duration,
+	debug func(string), errorHandler func(string)) *Bucket {
 	return &Bucket{
 		id:           id,
 		redis:        redis,
@@ -33,14 +34,21 @@ func NewBucket(redis Redis, redisPrefix string, instanceID string, id uint16, tt
 }
 
 func (b *Bucket) LockAndKeep(ctx context.Context) error {
-	b.lock(true)
+	b.mutex.Lock()
+	if b.locked {
+		b.mutex.Unlock()
+		return nil
+	}
+	b.lock()
+	b.mutex.Unlock()
 
 	go func() {
+		defer b.debug("stop keep goroutine")
 		ticker := time.NewTicker(time.Second)
-		defer ticker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
+				ticker.Stop()
 				return
 			case <-ticker.C:
 				b.keep(ctx)
@@ -51,11 +59,7 @@ func (b *Bucket) LockAndKeep(ctx context.Context) error {
 
 	return nil
 }
-func (b *Bucket) lock(internalLock bool) {
-	if internalLock {
-		b.mutex.Lock()
-		defer b.mutex.Unlock()
-	}
+func (b *Bucket) lock() {
 	if b.locked {
 		return
 	}
@@ -67,28 +71,28 @@ func (b *Bucket) lock(internalLock bool) {
 		return
 	}
 	if !success {
-		b.debug(fmt.Sprintf("bucket %d already locked", b.id))
 		return
 	}
+	b.debug("locked")
 	b.locked = true
 
 	return
 }
 func (b *Bucket) keep(ctx context.Context) {
-	ctx, cancel := context.WithTimeout(ctx, time.Second)
-	defer cancel()
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
 
 	// try to lock in case of late bucket availability
 	if !b.locked {
-		b.lock(false)
+		b.lock()
 		return
 	}
 
+	ctx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
 	if err := b.redis.Expire(ctx, b.getRedisKey(), b.lockTTL); err != nil {
 		b.errorHandler(err.Error())
-		b.lock(false) // try to lock in case of network loss
+		b.lock() // try to lock in case of network loss
 		return
 	}
 

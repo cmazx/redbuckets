@@ -203,16 +203,21 @@ func (i *Instance) rebalance(ctx context.Context, targetBuckets []uint16) {
 
 	i.bucketsMux.Lock()
 	defer i.bucketsMux.Unlock()
-
+	// [2,3]
 	newBuckets := make(map[uint16]*Bucket, len(targetBuckets))
-	for _, bucket := range targetBuckets {
-		newBuckets[bucket] = nil
+	for _, id := range targetBuckets {
+		newBuckets[id] = nil
 	}
+	i.debug("rebalance new buckets " + fmt.Sprintf("%d - %d", targetBuckets[0], targetBuckets[len(newBuckets)-1]))
 
 	if len(i.buckets) == 0 {
 		for _, id := range targetBuckets {
 			id := id
-			b := NewBucket(i.redis, i.redisPrefix, i.id, id, i.bucketLockTTL, i.debug, i.errorHandler)
+			b := NewBucket(i.redis, i.redisPrefix, i.id, id, i.bucketLockTTL, func(s string) {
+				i.debug("b" + strconv.Itoa(int(i.buckets[id].id)) + ": " + s)
+			}, func(s string) {
+				i.errorHandler("b" + strconv.Itoa(int(i.buckets[id].id)) + ": " + s)
+			})
 			newBuckets[id] = b
 			// allow to get error due bucket could not be freed by other instance yet
 			if err := b.LockAndKeep(ctx); err != nil {
@@ -224,13 +229,12 @@ func (i *Instance) rebalance(ctx context.Context, targetBuckets []uint16) {
 		return
 	}
 
-	if len(newBuckets) == 10 {
-		i.debug("final")
-	}
+	// 1,2
 	for id := range i.buckets {
-		if _, ok := newBuckets[id]; !ok {
+		if _, ok := newBuckets[id]; !ok { // 1
 			id := id
 			bucket := i.buckets[id]
+			i.debug("unlock bucket " + strconv.Itoa(int(bucket.id)))
 			// in case unlock failed it just expire after some time
 			if err := bucket.Unlock(); err != nil {
 				i.errorHandler(fmt.Sprintf("remove bucket: unlock bucket %d: %s", bucket.id, err.Error()))
@@ -238,20 +242,36 @@ func (i *Instance) rebalance(ctx context.Context, targetBuckets []uint16) {
 		}
 	}
 
+	// 2,3
 	for id := range newBuckets {
-		if _, ok := i.buckets[id]; !ok {
+		// this bucket is new
+		if _, ok := i.buckets[id]; !ok { // 3
 			id := id
-			b := NewBucket(i.redis, i.redisPrefix, i.id, id, i.bucketLockTTL, i.debug, i.errorHandler)
+			b := NewBucket(i.redis, i.redisPrefix, i.id, id, i.bucketLockTTL, func(s string) {
+				i.debug("b" + strconv.Itoa(int(i.buckets[id].id)) + ": " + s)
+			}, func(s string) {
+				i.errorHandler("b" + strconv.Itoa(int(i.buckets[id].id)) + ": " + s)
+			})
 			newBuckets[id] = b
 			if err := b.LockAndKeep(ctx); err != nil {
 				i.errorHandler(fmt.Sprintf("remove bucket: unlock bucket %d: %s", b.id, err.Error()))
 			}
-		} else {
+		} else { // 2
 			newBuckets[id] = i.buckets[id]
 		}
 	}
 
 	i.buckets = newBuckets
+}
+
+func (i *Instance) BucketsState() map[uint16]bool {
+	i.bucketsMux.RLock()
+	defer i.bucketsMux.RUnlock()
+	list := make(map[uint16]bool)
+	for _, bucket := range i.buckets {
+		list[bucket.id] = bucket.locked
+	}
+	return list
 }
 
 func (i *Instance) targetBuckets() []uint16 {
