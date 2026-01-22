@@ -134,6 +134,9 @@ func (i *Instance) Buckets() []uint16 {
 func (i *Instance) BucketFulfillment() int {
 	i.bucketsMux.RLock()
 	defer i.bucketsMux.RUnlock()
+	if len(i.buckets) == 0 {
+		return 100
+	}
 	return len(i.Buckets()) / len(i.buckets)
 }
 
