@@ -468,3 +468,48 @@ func TestInstance_refreshInstances(t *testing.T) {
 		}
 	})
 }
+
+func TestOptions(t *testing.T) {
+	redis := &RedisMock{instances: make(map[string]float64), keys: make(map[string]time.Time)}
+
+	t.Run("WithUnRegisterTimeout", func(t *testing.T) {
+		timeout := 15 * time.Second
+		inst, err := NewInstance(redis, "test-list", WithUnRegisterTimeout(timeout))
+		if err != nil {
+			t.Fatalf("failed to create instance: %v", err)
+		}
+		if inst.unRegisterTimeout != timeout {
+			t.Errorf("expected unRegisterTimeout %v, got %v", timeout, inst.unRegisterTimeout)
+		}
+	})
+
+	t.Run("WithBucketLockTTL", func(t *testing.T) {
+		ttl := 5 * time.Second
+		inst, err := NewInstance(redis, "test-list", WithBucketLockTTL(ttl))
+		if err != nil {
+			t.Fatalf("failed to create instance: %v", err)
+		}
+		if inst.bucketLockTTL != ttl {
+			t.Errorf("expected bucketLockTTL %v, got %v", ttl, inst.bucketLockTTL)
+		}
+	})
+
+	t.Run("WithBucketLockTTL_too_low", func(t *testing.T) {
+		ttl := 1 * time.Second
+		_, err := NewInstance(redis, "test-list", WithBucketLockTTL(ttl))
+		if err == nil {
+			t.Error("expected error for low bucketLockTTL, got nil")
+		}
+	})
+
+	t.Run("WithRedisPrefix", func(t *testing.T) {
+		prefix := "custom-prefix"
+		inst, err := NewInstance(redis, "test-list", WithRedisPrefix(prefix))
+		if err != nil {
+			t.Fatalf("failed to create instance: %v", err)
+		}
+		if inst.redisPrefix != prefix {
+			t.Errorf("expected redisPrefix %s, got %s", prefix, inst.redisPrefix)
+		}
+	})
+}
