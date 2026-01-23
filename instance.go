@@ -17,6 +17,7 @@ type Instance struct {
 	id                 string
 	buckets            map[uint16]*Bucket
 	bucketsMux         sync.RWMutex
+	registerMux        sync.Mutex
 	listKey            string
 	registerTimeout    time.Duration
 	unRegisterTimeout  time.Duration
@@ -112,6 +113,9 @@ func NewInstance(redis Redis, listKey string, options ...Options) (*Instance, er
 	if inst.bucketsTotalCount < 1 {
 		return nil, errors.New("bucket count couldn't be less than 1")
 	}
+	if inst.bucketsTotalCount%2 != 0 {
+		return nil, errors.New("bucket count must be even")
+	}
 	if inst.bucketLockTTL < time.Second*2 {
 		return nil, errors.New("bucket lock ttl couldn't be less than 2 seconds")
 	}
@@ -122,16 +126,16 @@ func NewInstance(redis Redis, listKey string, options ...Options) (*Instance, er
 func (i *Instance) ID() string {
 	return i.id
 }
-func (i *Instance) Buckets() []uint16 {
+func (i *Instance) Buckets() ([]uint16, func()) {
 	i.bucketsMux.RLock()
-	defer i.bucketsMux.RUnlock()
+
 	lockedBuckets := make([]uint16, 0, len(i.buckets))
 	for _, bucket := range i.buckets {
 		if bucket.IsLocked() {
 			lockedBuckets = append(lockedBuckets, bucket.id)
 		}
 	}
-	return lockedBuckets
+	return lockedBuckets, func() { i.bucketsMux.RUnlock() }
 }
 func (i *Instance) BucketFulfillment() int {
 	i.bucketsMux.RLock()
@@ -140,12 +144,16 @@ func (i *Instance) BucketFulfillment() int {
 	if bucketsCount == 0 {
 		return 100
 	}
-	return (len(i.Buckets()) * 100) / bucketsCount
+	buckets, freeLock := i.Buckets()
+	defer freeLock()
+	return (len(buckets) * 100) / bucketsCount
 }
 
 func (i *Instance) registerInstance(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, i.registerTimeout)
 	defer cancel()
+	i.registerMux.Lock()
+	defer i.registerMux.Unlock()
 	if err := i.redis.ZAdd(ctx, i.listKey, i.id, float64(time.Now().Unix())); err != nil {
 		return fmt.Errorf("register instance: %w", err)
 	}
@@ -173,7 +181,13 @@ func (i *Instance) Run(ctx context.Context) error {
 		return fmt.Errorf("register instance: %w", err)
 	}
 	i.refreshInstances(ctx)
-	i.rebalance(ctx, i.targetBuckets())
+	i.rebalance(ctx, i.targetBuckets(0, 0))
+
+	go func() {
+		if err := i.registerInstance(ctx); err != nil {
+			i.errorHandler(fmt.Sprintf("register instance: %s", err.Error()))
+		}
+	}()
 
 	t := time.NewTicker(i.registerPeriod)
 	defer t.Stop()
@@ -191,10 +205,13 @@ func (i *Instance) Run(ctx context.Context) error {
 			if err := i.registerInstance(ctx); err != nil {
 				i.errorHandler(fmt.Sprintf("register instance: %s", err.Error()))
 			}
-			if i.refreshInstances(ctx) {
-				i.rebalance(ctx, i.targetBuckets())
-				t.Reset(i.registerPeriod)
+			rebalance, instanceIndex, instanceCount := i.refreshInstances(ctx)
+			if rebalance {
+				i.rebalance(ctx, i.targetBuckets(instanceIndex, instanceCount))
 			}
+			i.lastInstanceIndex = instanceIndex
+			i.lastInstancesCount = instanceCount
+			t.Reset(i.registerPeriod)
 		}
 	}
 }
@@ -210,7 +227,11 @@ func (i *Instance) rebalance(ctx context.Context, targetBuckets []uint16) {
 	for _, id := range targetBuckets {
 		newBuckets[id] = nil
 	}
-	i.debug("rebalance new buckets " + fmt.Sprintf("%d - %d", targetBuckets[0], targetBuckets[len(newBuckets)-1]))
+	if len(targetBuckets) > 0 {
+		i.debug("rebalance new buckets " + fmt.Sprintf("%d - %d", targetBuckets[0], targetBuckets[len(targetBuckets)-1]))
+	} else {
+		i.debug("rebalance new buckets empty")
+	}
 
 	if len(i.buckets) == 0 {
 		for _, id := range targetBuckets {
@@ -276,37 +297,29 @@ func (i *Instance) BucketsState() map[uint16]bool {
 	return list
 }
 
-func (i *Instance) targetBuckets() []uint16 {
+func (i *Instance) targetBuckets(instanceIndex, instanceCount int) []uint16 {
 	// not yet registered
-	if i.lastInstancesCount == 0 {
+	if instanceCount == 0 {
 		return nil
 	}
-	if i.bucketsTotalCount < i.lastInstancesCount {
+	if i.bucketsTotalCount < instanceCount {
 		// buckets are not enough for the current instance
-		if i.lastInstanceIndex >= i.bucketsTotalCount {
+		if instanceIndex >= i.bucketsTotalCount {
 			return nil
 		}
-		return []uint16{uint16(i.lastInstanceIndex)}
+		return []uint16{uint16(instanceIndex)}
 	}
 
-	var bucketRangeStart, bucketRangeEnd int
-	bucketBatch := i.bucketsTotalCount / i.lastInstancesCount
-	bucketRangeStart = (i.lastInstanceIndex) * bucketBatch
-	bucketRangeEnd = (i.lastInstanceIndex+1)*bucketBatch - 1
-
-	if bucketRangeEnd > i.bucketsTotalCount-1 {
-		bucketRangeEnd = i.bucketsTotalCount - 1
-	}
-
-	targetBuckets := make([]uint16, bucketBatch)
+	perInstance := i.bucketsTotalCount / instanceCount
+	targetBuckets := make([]uint16, perInstance)
 	pos := 0
-	for bucket := range bucketBatch {
-		targetBuckets[pos] = uint16(bucketRangeStart + bucket)
+	for n := range perInstance {
+		targetBuckets[pos] = uint16(instanceIndex*perInstance + n)
 		pos++
 	}
 	return targetBuckets
 }
-func (i *Instance) refreshInstances(ctx context.Context) bool {
+func (i *Instance) refreshInstances(ctx context.Context) (bool, int, int) {
 	ctx, cancel := context.WithTimeout(ctx, i.rangeTimeout)
 	defer cancel()
 	instances, err := i.redis.ZRangeByScore(
@@ -316,20 +329,18 @@ func (i *Instance) refreshInstances(ctx context.Context) bool {
 		"+inf")
 	if err != nil {
 		i.errorHandler(fmt.Sprintf("check instance rebalance: %s", err.Error()))
-		return false
+		return false, i.lastInstanceIndex, i.lastInstancesCount
 	}
 	slices.Sort(instances)
 	currentIndex := slices.Index(instances, i.id)
 	if currentIndex == -1 {
 		i.errorHandler(fmt.Sprintf("check instance rebalance: current instance id not found! %s", i.id))
-		return false
+		return false, i.lastInstanceIndex, i.lastInstancesCount
 	}
 	// nothing changed in my position
 	if currentIndex == i.lastInstanceIndex && len(instances) == i.lastInstancesCount {
-		return false
+		return false, i.lastInstanceIndex, i.lastInstancesCount
 	}
-	i.lastInstanceIndex = currentIndex
-	i.lastInstancesCount = len(instances)
 
-	return true
+	return true, currentIndex, len(instances)
 }

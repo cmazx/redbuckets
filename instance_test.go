@@ -16,6 +16,7 @@ type RedisMock struct {
 	keys                  map[string]time.Time
 	failZAdd              bool
 	failZRem              bool
+	failZRange            bool
 	simulateLongOperation bool
 }
 
@@ -54,6 +55,9 @@ func (m *RedisMock) ZRem(ctx context.Context, key, member string) error {
 func (m *RedisMock) ZRangeByScore(ctx context.Context, key string, minScore string, maxScore string) ([]string, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	if m.failZRange {
+		return nil, errors.New("ZRangeByScore failed")
+	}
 	type item struct {
 		member string
 		score  float64
@@ -280,4 +284,177 @@ func TestRun(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestInstance_targetBuckets(t *testing.T) {
+	tests := []struct {
+		name               string
+		bucketsTotalCount  int
+		lastInstancesCount int
+		lastInstanceIndex  int
+		want               []uint16
+	}{
+		{
+			name:               "not registered yet => nil",
+			bucketsTotalCount:  10,
+			lastInstancesCount: 0,
+			lastInstanceIndex:  0,
+			want:               nil,
+		},
+		{
+			name:               "buckets less than instances: index within range => single bucket == index",
+			bucketsTotalCount:  2,
+			lastInstancesCount: 5,
+			lastInstanceIndex:  1,
+			want:               []uint16{1},
+		},
+		{
+			name:               "buckets less than instances: index out of range => nil",
+			bucketsTotalCount:  2,
+			lastInstancesCount: 5,
+			lastInstanceIndex:  2,
+			want:               nil,
+		},
+		{
+			name:               "even split 10 buckets / 2 instances, first instance gets 0..4",
+			bucketsTotalCount:  10,
+			lastInstancesCount: 2,
+			lastInstanceIndex:  0,
+			want:               []uint16{0, 1, 2, 3, 4},
+		},
+		{
+			name:               "even split 10 buckets / 2 instances, second instance gets 5..9",
+			bucketsTotalCount:  10,
+			lastInstancesCount: 2,
+			lastInstanceIndex:  1,
+			want:               []uint16{5, 6, 7, 8, 9},
+		},
+		{
+			name:               "non-even split uses integer division (10/3=3), middle instance gets 3..5",
+			bucketsTotalCount:  10,
+			lastInstancesCount: 3,
+			lastInstanceIndex:  1,
+			want:               []uint16{3, 4, 5},
+		},
+		{
+			name:               "non-even split uses integer division (10/3=3), last instance gets 6..8 (bucket 9 is not assigned by current logic)",
+			bucketsTotalCount:  10,
+			lastInstancesCount: 3,
+			lastInstanceIndex:  2,
+			want:               []uint16{6, 7, 8},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			i := &Instance{
+				bucketsTotalCount:  tt.bucketsTotalCount,
+				lastInstancesCount: tt.lastInstancesCount,
+				lastInstanceIndex:  tt.lastInstanceIndex,
+			}
+
+			got := i.targetBuckets(tt.lastInstanceIndex, tt.lastInstancesCount)
+			if !slices.Equal(got, tt.want) {
+				t.Fatalf("targetBuckets() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestInstance_refreshInstances(t *testing.T) {
+	ctx := context.Background()
+	redis := &RedisMock{
+		instances: make(map[string]float64),
+		keys:      make(map[string]time.Time),
+	}
+	id := "inst-1"
+	inst, _ := NewInstance(redis, "test-list", WithId(id))
+
+	// Helper to set instances in redis
+	setInstances := func(members ...string) {
+		redis.mu.Lock()
+		defer redis.mu.Unlock()
+		redis.instances = make(map[string]float64)
+		for _, m := range members {
+			redis.instances[m] = float64(time.Now().Unix())
+		}
+	}
+
+	t.Run("first_refresh", func(t *testing.T) {
+		setInstances(id)
+		rebalance, idx, count := inst.refreshInstances(ctx)
+		if !rebalance {
+			t.Error("expected rebalance on first refresh")
+		}
+		if idx != 0 {
+			t.Errorf("expected index 0, got %d", idx)
+		}
+		if count != 1 {
+			t.Errorf("expected count 1, got %d", count)
+		}
+		inst.lastInstanceIndex = idx
+		inst.lastInstancesCount = count
+	})
+
+	t.Run("no_change", func(t *testing.T) {
+		setInstances(id)
+		rebalance, _, count := inst.refreshInstances(ctx)
+		if rebalance {
+			t.Error("expected no rebalance when nothing changed")
+		}
+		if count != 1 {
+			t.Errorf("expected count 1, got %d", count)
+		}
+	})
+
+	t.Run("instances_changed", func(t *testing.T) {
+		setInstances(id, "inst-0") // inst-0 < inst-1 (alphabetically)
+		rebalance, idx, count := inst.refreshInstances(ctx)
+		if !rebalance {
+			t.Error("expected rebalance when instances changed")
+		}
+		if idx != 1 {
+			t.Errorf("expected index 1, got %d", idx)
+		}
+		if count != 2 {
+			t.Errorf("expected count 2, got %d", count)
+		}
+		inst.lastInstanceIndex = idx
+		inst.lastInstancesCount = count
+	})
+
+	t.Run("no_change_after_update", func(t *testing.T) {
+		setInstances(id, "inst-0")
+		rebalance, _, count := inst.refreshInstances(ctx)
+		if rebalance {
+			t.Error("expected no rebalance when nothing changed")
+		}
+		if count != 2 {
+			t.Errorf("expected count 2, got %d", count)
+		}
+	})
+
+	t.Run("redis_error", func(t *testing.T) {
+		redis.mu.Lock()
+		redis.failZRange = true
+		redis.mu.Unlock()
+		defer func() {
+			redis.mu.Lock()
+			redis.failZRange = false
+			redis.mu.Unlock()
+		}()
+
+		rebalance, _, _ := inst.refreshInstances(ctx)
+		if rebalance {
+			t.Error("expected no rebalance on redis error")
+		}
+	})
+
+	t.Run("instance_id_not_found", func(t *testing.T) {
+		setInstances("other-inst")
+		rebalance, _, _ := inst.refreshInstances(ctx)
+		if rebalance {
+			t.Error("expected no rebalance when current instance not found")
+		}
+	})
 }
