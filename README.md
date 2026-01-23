@@ -45,28 +45,32 @@ func main() {
         log.Fatal(err)
     }
 
-    ctx := context.Background()
+    ctx, cancel := context.WithCancel(context.Background())
+    defer cancel()
 
     // Start the instance management
-    if err := svc.Run(ctx); err != nil {
-        log.Fatal(err)
-    }
-
-    // Periodically check which buckets this instance owns
+    // This will block until the context is canceled or a fatal error occurs.
     go func() {
-        for {
-            for bucketID := range svc.Buckets() {
-                // Process tasks for this bucket
-                _ = bucketID
-            }
-            time.Sleep(time.Second)
+        if err := svc.Run(ctx); err != nil {
+            log.Printf("Service run failed: %v", err)
         }
     }()
 
-    // Run until interrupted
-    // ...
-    
-    svc.Stop()
+    // Periodically check which buckets this instance owns
+    for {
+        buckets, unlock := svc.Buckets()
+        for _, bucketID := range buckets {
+            // Process tasks for this bucket
+            _ = bucketID
+        }
+        unlock() // Important: release the read lock on the buckets map
+        
+        select {
+        case <-ctx.Done():
+            return
+        case <-time.After(time.Second):
+        }
+    }
 }
 ```
 
@@ -78,7 +82,8 @@ The `NewInstance` function accepts several functional options:
 - `WithBuckets(count uint16)`: Sets the total number of buckets to distribute. Default is 1024.
 - `WithBucketLockTTL(ttl time.Duration)`: Sets the TTL for bucket locks in Redis. Default is 10s.
 - `WithRegisterPeriod(period time.Duration)`: Sets how often the instance refreshes its registration in Redis. Default is 1s.
-- `WithRegisterTimeout(timeout time.Duration)`: Sets the timeout for registration operations. Default is 2s.
+- `WithRegisterTimeout(timeout time.Duration)`: Sets the timeout for registration operations. Default is 3s.
+- `WithUnRegisterTimeout(timeout time.Duration)`: Sets the timeout for unregistration operations. Default is 10s.
 - `WithRedisPrefix(prefix string)`: Sets the prefix for Redis keys used for bucket locking. Default is `red-buckets`.
 - `WithDebug(debug func(string))`: Sets a debug logger.
 - `WithErrorHandler(handler func(string))`: Sets an error handler.
@@ -100,7 +105,8 @@ type Redis interface {
 	ZAdd(ctx context.Context, key, member string, score float64) error
 	ZRem(ctx context.Context, key, member string) error
 	ZRangeByScore(ctx context.Context, key string, minScore string, maxScore string) ([]string, error)
-	SetNxEx(ctx context.Context, key string, value string, ttl time.Duration) error
-	Rem(ctx context.Context, key string) error
+	SetNxEx(ctx context.Context, key string, value string, ttl time.Duration) (bool, error)
+	Delete(ctx context.Context, key string) error
+	Expire(ctx context.Context, s string, ttl time.Duration) error
 }
 ```

@@ -2,6 +2,7 @@ package redbuckets
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"sync"
@@ -9,61 +10,62 @@ import (
 )
 
 type Bucket struct {
-	id           uint16
-	instanceID   string
-	debug        func(string)
-	errorHandler func(string)
-	redis        Redis
-	lockTTL      time.Duration
-	redisPrefix  string
-	locked       bool
-	mutex        sync.Mutex
-	unlockCh     chan struct{}
-	unlockedCh   chan struct{}
+	id            uint16
+	instanceID    string
+	debug         func(string)
+	errorHandler  func(string)
+	redis         Redis
+	lockTTL       time.Duration
+	redisPrefix   string
+	locked        bool
+	mutex         sync.Mutex
+	stopKeepCh    chan struct{}
+	keepStoppedCh chan struct{}
+	started       bool
 }
 
 func NewBucket(redis Redis, redisPrefix string, instanceID string, id uint16, ttl time.Duration,
 	debug func(string), errorHandler func(string)) *Bucket {
 	return &Bucket{
-		id:           id,
-		redis:        redis,
-		debug:        debug,
-		errorHandler: errorHandler,
-		lockTTL:      ttl,
-		instanceID:   instanceID,
-		redisPrefix:  redisPrefix,
-		unlockCh:     make(chan struct{}, 1),
-		unlockedCh:   make(chan struct{}, 1),
+		id:            id,
+		redis:         redis,
+		debug:         debug,
+		errorHandler:  errorHandler,
+		lockTTL:       ttl,
+		instanceID:    instanceID,
+		redisPrefix:   redisPrefix,
+		stopKeepCh:    make(chan struct{}, 1),
+		keepStoppedCh: make(chan struct{}, 1),
 	}
 }
 
 func (b *Bucket) LockAndKeep(ctx context.Context) error {
 	b.mutex.Lock()
-	if b.locked {
+	if b.started {
 		b.mutex.Unlock()
-		return nil
+		return errors.New("already started")
 	}
+	b.started = true
 	b.lock()
 	b.mutex.Unlock()
 
 	go func() {
 		defer b.debug("stop keep goroutine")
 		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
 		for {
 			select {
-			case <-b.unlockCh:
-				ticker.Stop()
+			case <-b.stopKeepCh:
+				close(b.keepStoppedCh)
 				return
 			case <-ctx.Done():
-				ticker.Stop()
+				close(b.keepStoppedCh)
 				return
 			case <-ticker.C:
 				b.keep(ctx)
-				ticker.Reset(time.Second)
 			}
 		}
 	}()
-	b.unlockedCh <- struct{}{}
 
 	return nil
 }
@@ -111,12 +113,25 @@ func (b *Bucket) getRedisKey() string {
 	return b.redisPrefix + strconv.Itoa(int(b.id))
 }
 
+// Unlock if lockAndKeep never called and succeed b.locked is false, and there is no work
+// if lockAndKeep exited then keepStoppedCh is closed
 func (b *Bucket) Unlock() error {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
+	if !b.locked {
+		if b.started {
+			select {
+			case b.stopKeepCh <- struct{}{}:
+				<-b.keepStoppedCh
+			default:
+				// Already stopping or stopped
+			}
+		}
+		return nil
+	}
 	b.locked = false
-	b.unlockCh <- struct{}{}
-	<-b.unlockedCh
+	b.stopKeepCh <- struct{}{}
+	<-b.keepStoppedCh
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if err := b.redis.Delete(ctx, b.getRedisKey()); err != nil {

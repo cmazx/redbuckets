@@ -32,6 +32,8 @@ type Instance struct {
 	stop               chan struct{}
 	bucketLockTTL      time.Duration
 	redisPrefix        string
+	lastRegistration   time.Time
+	instanceMux        *sync.Mutex
 }
 type Options func(*Instance)
 
@@ -105,6 +107,7 @@ func NewInstance(redis Redis, listKey string, options ...Options) (*Instance, er
 		bucketLockTTL:     time.Second * 10,
 		bucketsTotalCount: 1024,
 		redisPrefix:       "red-buckets",
+		instanceMux:       &sync.Mutex{},
 	}
 	for _, option := range options {
 		option(inst)
@@ -126,6 +129,13 @@ func NewInstance(redis Redis, listKey string, options ...Options) (*Instance, er
 func (i *Instance) ID() string {
 	return i.id
 }
+func (i *Instance) LastRegistration() time.Time {
+	i.instanceMux.Lock()
+	defer i.instanceMux.Unlock()
+	return i.lastRegistration
+}
+
+// Buckets returns a list of IDs for locked buckets and a function to release the read lock on the buckets map.
 func (i *Instance) Buckets() ([]uint16, func()) {
 	i.bucketsMux.RLock()
 
@@ -137,16 +147,24 @@ func (i *Instance) Buckets() ([]uint16, func()) {
 	}
 	return lockedBuckets, func() { i.bucketsMux.RUnlock() }
 }
+
+// BucketFulfillment returns the percentage of locked buckets
+// in case of no buckets assigned to instance returns -1
 func (i *Instance) BucketFulfillment() int {
 	i.bucketsMux.RLock()
 	defer i.bucketsMux.RUnlock()
 	bucketsCount := len(i.buckets)
 	if bucketsCount == 0 {
-		return 100
+		return -1
 	}
-	buckets, freeLock := i.Buckets()
-	defer freeLock()
-	return (len(buckets) * 100) / bucketsCount
+
+	lockedCount := 0
+	for _, bucket := range i.buckets {
+		if bucket != nil && bucket.IsLocked() {
+			lockedCount++
+		}
+	}
+	return (lockedCount * 100) / bucketsCount
 }
 
 func (i *Instance) registerInstance(ctx context.Context) error {
@@ -161,59 +179,97 @@ func (i *Instance) registerInstance(ctx context.Context) error {
 }
 func (i *Instance) unRegisterInstance(ctx context.Context) error {
 	i.bucketsMux.Lock()
-	defer i.bucketsMux.Unlock()
 	if len(i.buckets) > 0 {
 		for _, bucket := range i.buckets {
 			if err := bucket.Unlock(); err != nil {
-				i.errorHandler(fmt.Sprintf("remove bucket: unlock bucket %d: %s", bucket.id, err.Error()))
+				i.errorHandler(fmt.Sprintf("unregister: unlock bucket %d: %s", bucket.id, err.Error()))
 			}
 		}
-		i.buckets = nil
+		clear(i.buckets)
 	}
+	i.bucketsMux.Unlock()
 	if err := i.redis.ZRem(ctx, i.listKey, i.id); err != nil {
-		return fmt.Errorf("register instance: %w", err)
+		return fmt.Errorf("unregister instance: %w", err)
 	}
 	return nil
 }
 func (i *Instance) Run(ctx context.Context) error {
-	// first registration and rebalance
+	// First registration attempt
 	if err := i.registerInstance(ctx); err != nil {
 		return fmt.Errorf("register instance: %w", err)
 	}
-	i.refreshInstances(ctx)
-	i.rebalance(ctx, i.targetBuckets(0, 0))
+	i.instanceMux.Lock()
+	i.lastRegistration = time.Now()
+	i.instanceMux.Unlock()
 
+	// Initial rebalance
+	i.update(ctx)
+	i.wg.Add(2)
 	go func() {
-		if err := i.registerInstance(ctx); err != nil {
-			i.errorHandler(fmt.Sprintf("register instance: %s", err.Error()))
-		}
+		defer i.wg.Done()
+		i.intanceRegistrationRoutine(ctx)
 	}()
+	go func() {
+		defer i.wg.Done()
+		i.updateRoutine(ctx)
+	}()
+	i.wg.Wait()
+	return nil
+}
 
+func (i *Instance) updateRoutine(ctx context.Context) {
+	t := time.NewTicker(i.registerPeriod)
+	defer t.Stop()
+loop:
+	for {
+		select {
+		case <-ctx.Done():
+			break loop
+		case <-t.C:
+			i.update(ctx)
+		}
+	}
+}
+
+func (i *Instance) intanceRegistrationRoutine(ctx context.Context) {
 	t := time.NewTicker(i.registerPeriod)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			t.Stop()
-			registerCtx, cancel := context.WithTimeout(context.Background(), i.unRegisterTimeout)
-			if err := i.unRegisterInstance(registerCtx); err != nil {
+			i.instanceMux.Lock()
+			unRegisterCtx, cancel := context.WithTimeout(context.Background(), i.unRegisterTimeout)
+			if err := i.unRegisterInstance(unRegisterCtx); err != nil {
 				i.errorHandler(fmt.Sprintf("de-register instance: %s", err.Error()))
 			}
 			cancel()
-			return nil
+			i.instanceMux.Unlock()
+			return
 		case <-t.C:
+			i.instanceMux.Lock()
 			if err := i.registerInstance(ctx); err != nil {
 				i.errorHandler(fmt.Sprintf("register instance: %s", err.Error()))
+			} else {
+				i.lastRegistration = time.Now()
 			}
-			rebalance, instanceIndex, instanceCount := i.refreshInstances(ctx)
-			if rebalance {
-				i.rebalance(ctx, i.targetBuckets(instanceIndex, instanceCount))
-			}
-			i.lastInstanceIndex = instanceIndex
-			i.lastInstancesCount = instanceCount
-			t.Reset(i.registerPeriod)
+			i.instanceMux.Unlock()
 		}
 	}
+}
+func (i *Instance) update(ctx context.Context) {
+	i.instanceMux.Lock()
+	defer i.instanceMux.Unlock()
+	if i.lastRegistration.Before(time.Now().Add(-i.unRegisterTimeout)) {
+		i.errorHandler("update: last registration is too old, skip rebalance")
+		return
+	}
+
+	rebalance, instanceIndex, instanceCount := i.refreshInstances(ctx, i.lastInstancesCount, i.lastInstancesCount)
+	if rebalance {
+		i.rebalance(ctx, i.targetBuckets(instanceIndex, instanceCount))
+	}
+	i.lastInstanceIndex = instanceIndex
+	i.lastInstancesCount = instanceCount
 }
 
 func (i *Instance) rebalance(ctx context.Context, targetBuckets []uint16) {
@@ -228,7 +284,8 @@ func (i *Instance) rebalance(ctx context.Context, targetBuckets []uint16) {
 		newBuckets[id] = nil
 	}
 	if len(targetBuckets) > 0 {
-		i.debug("rebalance new buckets " + fmt.Sprintf("%d - %d", targetBuckets[0], targetBuckets[len(targetBuckets)-1]))
+		i.debug("rebalance new buckets " + fmt.Sprintf("%d - %d",
+			targetBuckets[0], targetBuckets[len(targetBuckets)-1]))
 	} else {
 		i.debug("rebalance new buckets empty")
 	}
@@ -244,7 +301,7 @@ func (i *Instance) rebalance(ctx context.Context, targetBuckets []uint16) {
 			newBuckets[id] = b
 			// allow to get error due bucket could not be freed by other instance yet
 			if err := b.LockAndKeep(ctx); err != nil {
-				i.errorHandler(fmt.Sprintf("remove bucket: unlock bucket %d: %s", b.id, err.Error()))
+				i.errorHandler(fmt.Sprintf("add bucket: lock bucket %d: %s", b.id, err.Error()))
 			}
 		}
 
@@ -253,10 +310,8 @@ func (i *Instance) rebalance(ctx context.Context, targetBuckets []uint16) {
 	}
 
 	// 1,2
-	for id := range i.buckets {
-		if _, ok := newBuckets[id]; !ok { // 1
-			id := id
-			bucket := i.buckets[id]
+	for id, bucket := range i.buckets {
+		if _, ok := newBuckets[id]; !ok { // 1=
 			i.debug("unlock bucket " + strconv.Itoa(int(bucket.id)))
 			// in case unlock failed it just expire after some time
 			if err := bucket.Unlock(); err != nil {
@@ -277,7 +332,7 @@ func (i *Instance) rebalance(ctx context.Context, targetBuckets []uint16) {
 			})
 			newBuckets[id] = b
 			if err := b.LockAndKeep(ctx); err != nil {
-				i.errorHandler(fmt.Sprintf("remove bucket: unlock bucket %d: %s", b.id, err.Error()))
+				i.errorHandler(fmt.Sprintf("add bucket: lock bucket %d: %s", b.id, err.Error()))
 			}
 		} else { // 2
 			newBuckets[id] = i.buckets[id]
@@ -311,15 +366,21 @@ func (i *Instance) targetBuckets(instanceIndex, instanceCount int) []uint16 {
 	}
 
 	perInstance := i.bucketsTotalCount / instanceCount
-	targetBuckets := make([]uint16, perInstance)
-	pos := 0
-	for n := range perInstance {
-		targetBuckets[pos] = uint16(instanceIndex*perInstance + n)
-		pos++
+	remainder := i.bucketsTotalCount % instanceCount
+
+	start := instanceIndex*perInstance + min(instanceIndex, remainder)
+	count := perInstance
+	if instanceIndex < remainder {
+		count++
+	}
+
+	targetBuckets := make([]uint16, 0, count)
+	for n := range count {
+		targetBuckets = append(targetBuckets, uint16(start+n))
 	}
 	return targetBuckets
 }
-func (i *Instance) refreshInstances(ctx context.Context) (bool, int, int) {
+func (i *Instance) refreshInstances(ctx context.Context, lastInstanceIndex, lastInstancesCount int) (bool, int, int) {
 	ctx, cancel := context.WithTimeout(ctx, i.rangeTimeout)
 	defer cancel()
 	instances, err := i.redis.ZRangeByScore(
@@ -329,17 +390,17 @@ func (i *Instance) refreshInstances(ctx context.Context) (bool, int, int) {
 		"+inf")
 	if err != nil {
 		i.errorHandler(fmt.Sprintf("check instance rebalance: %s", err.Error()))
-		return false, i.lastInstanceIndex, i.lastInstancesCount
+		return false, lastInstanceIndex, lastInstancesCount
 	}
 	slices.Sort(instances)
 	currentIndex := slices.Index(instances, i.id)
 	if currentIndex == -1 {
 		i.errorHandler(fmt.Sprintf("check instance rebalance: current instance id not found! %s", i.id))
-		return false, i.lastInstanceIndex, i.lastInstancesCount
+		return false, lastInstanceIndex, lastInstancesCount
 	}
 	// nothing changed in my position
-	if currentIndex == i.lastInstanceIndex && len(instances) == i.lastInstancesCount {
-		return false, i.lastInstanceIndex, i.lastInstancesCount
+	if currentIndex == lastInstanceIndex && len(instances) == lastInstancesCount {
+		return false, lastInstanceIndex, lastInstancesCount
 	}
 
 	return true, currentIndex, len(instances)

@@ -232,10 +232,10 @@ func TestRun(t *testing.T) {
 				WithRegisterTimeout(5*time.Second),
 				WithRegisterPeriod(2*time.Second),
 				WithDebug(func(msg string) {
-					t.Log("debug:", msg)
+					fmt.Println("debug:", msg)
 				}),
 				WithErrorHandler(func(errMsg string) {
-					t.Log("error:", errMsg)
+					fmt.Println("error:", errMsg)
 				}),
 			)
 			if err != nil {
@@ -249,18 +249,13 @@ func TestRun(t *testing.T) {
 
 			// Run the instance
 			ctx, cancel := context.WithCancel(context.Background())
-			wg := sync.WaitGroup{}
-			wg.Go(func() {
-				err = inst.Run(ctx)
-				// Check for expected errors during Run
-				if tc.expectError && err == nil {
-					t.Error("expected an error, but got none")
-					return
-				} else if !tc.expectError && err != nil {
-					t.Errorf("unexpected error: %v", err)
-					return
-				}
-			})
+			var wg sync.WaitGroup
+			var runErr error
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				runErr = inst.Run(ctx)
+			}()
 
 			if tc.checkDuringRun != nil {
 				// Give it a bit of time to register and rebalance
@@ -276,6 +271,14 @@ func TestRun(t *testing.T) {
 			}
 			cancel()
 			wg.Wait()
+
+			// Check for expected errors during Run
+			if tc.expectError && runErr == nil {
+				t.Error("expected an error, but got none")
+			} else if !tc.expectError && runErr != nil && !errors.Is(runErr, context.Canceled) {
+				t.Errorf("unexpected error: %v", runErr)
+			}
+
 			// Run afterRun checks
 			if tc.checkAfterRun != nil {
 				if err := tc.checkAfterRun(inst, redis); err != nil {
@@ -330,18 +333,25 @@ func TestInstance_targetBuckets(t *testing.T) {
 			want:               []uint16{5, 6, 7, 8, 9},
 		},
 		{
-			name:               "non-even split uses integer division (10/3=3), middle instance gets 3..5",
+			name:               "non-even split: 10 buckets / 3 instances, first gets 0..2",
+			bucketsTotalCount:  10,
+			lastInstancesCount: 3,
+			lastInstanceIndex:  0,
+			want:               []uint16{0, 1, 2, 3},
+		},
+		{
+			name:               "non-even split: 10 buckets / 3 instances, middle gets 4..6",
 			bucketsTotalCount:  10,
 			lastInstancesCount: 3,
 			lastInstanceIndex:  1,
-			want:               []uint16{3, 4, 5},
+			want:               []uint16{4, 5, 6},
 		},
 		{
-			name:               "non-even split uses integer division (10/3=3), last instance gets 6..8 (bucket 9 is not assigned by current logic)",
+			name:               "non-even split: 10 buckets / 3 instances, last gets 7..9",
 			bucketsTotalCount:  10,
 			lastInstancesCount: 3,
 			lastInstanceIndex:  2,
-			want:               []uint16{6, 7, 8},
+			want:               []uint16{7, 8, 9},
 		},
 	}
 
@@ -382,7 +392,7 @@ func TestInstance_refreshInstances(t *testing.T) {
 
 	t.Run("first_refresh", func(t *testing.T) {
 		setInstances(id)
-		rebalance, idx, count := inst.refreshInstances(ctx)
+		rebalance, idx, count := inst.refreshInstances(ctx, inst.lastInstanceIndex, inst.lastInstancesCount)
 		if !rebalance {
 			t.Error("expected rebalance on first refresh")
 		}
@@ -398,7 +408,7 @@ func TestInstance_refreshInstances(t *testing.T) {
 
 	t.Run("no_change", func(t *testing.T) {
 		setInstances(id)
-		rebalance, _, count := inst.refreshInstances(ctx)
+		rebalance, _, count := inst.refreshInstances(ctx, inst.lastInstanceIndex, inst.lastInstancesCount)
 		if rebalance {
 			t.Error("expected no rebalance when nothing changed")
 		}
@@ -409,7 +419,7 @@ func TestInstance_refreshInstances(t *testing.T) {
 
 	t.Run("instances_changed", func(t *testing.T) {
 		setInstances(id, "inst-0") // inst-0 < inst-1 (alphabetically)
-		rebalance, idx, count := inst.refreshInstances(ctx)
+		rebalance, idx, count := inst.refreshInstances(ctx, inst.lastInstanceIndex, inst.lastInstancesCount)
 		if !rebalance {
 			t.Error("expected rebalance when instances changed")
 		}
@@ -425,7 +435,7 @@ func TestInstance_refreshInstances(t *testing.T) {
 
 	t.Run("no_change_after_update", func(t *testing.T) {
 		setInstances(id, "inst-0")
-		rebalance, _, count := inst.refreshInstances(ctx)
+		rebalance, _, count := inst.refreshInstances(ctx, inst.lastInstanceIndex, inst.lastInstancesCount)
 		if rebalance {
 			t.Error("expected no rebalance when nothing changed")
 		}
@@ -444,7 +454,7 @@ func TestInstance_refreshInstances(t *testing.T) {
 			redis.mu.Unlock()
 		}()
 
-		rebalance, _, _ := inst.refreshInstances(ctx)
+		rebalance, _, _ := inst.refreshInstances(ctx, inst.lastInstanceIndex, inst.lastInstancesCount)
 		if rebalance {
 			t.Error("expected no rebalance on redis error")
 		}
@@ -452,7 +462,7 @@ func TestInstance_refreshInstances(t *testing.T) {
 
 	t.Run("instance_id_not_found", func(t *testing.T) {
 		setInstances("other-inst")
-		rebalance, _, _ := inst.refreshInstances(ctx)
+		rebalance, _, _ := inst.refreshInstances(ctx, inst.lastInstanceIndex, inst.lastInstancesCount)
 		if rebalance {
 			t.Error("expected no rebalance when current instance not found")
 		}
