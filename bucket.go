@@ -17,11 +17,12 @@ type Bucket struct {
 	redis         Redis
 	lockTTL       time.Duration
 	redisPrefix   string
-	locked        bool
+	lockedAt      time.Time
 	mutex         sync.Mutex
 	stopKeepCh    chan struct{}
 	keepStoppedCh chan struct{}
 	started       bool
+	terminating   bool
 }
 
 func NewBucket(redis Redis, redisPrefix string, instanceID string, id uint16, ttl time.Duration,
@@ -70,7 +71,10 @@ func (b *Bucket) LockAndKeep(ctx context.Context) error {
 	return nil
 }
 func (b *Bucket) lock() {
-	if b.locked {
+	if b.StillLocked() {
+		return
+	}
+	if b.terminating {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -84,16 +88,20 @@ func (b *Bucket) lock() {
 		return
 	}
 	b.debug("locked")
-	b.locked = true
+	b.lockedAt = time.Now()
 
 	return
+}
+
+func (b *Bucket) StillLocked() bool {
+	return b.lockedAt.Before(time.Now().Add(-b.lockTTL))
 }
 func (b *Bucket) keep(ctx context.Context) {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
 
 	// try to lock in case of late bucket availability
-	if !b.locked {
+	if !b.StillLocked() {
 		b.lock()
 		return
 	}
@@ -113,25 +121,19 @@ func (b *Bucket) getRedisKey() string {
 	return b.redisPrefix + strconv.Itoa(int(b.id))
 }
 
-// Unlock if lockAndKeep never called and succeed b.locked is false, and there is no work
+// Unlock if lockAndKeep never called and succeed b.lockedAt is false, and there is no work
 // if lockAndKeep exited then keepStoppedCh is closed
 func (b *Bucket) Unlock() error {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
-	if !b.locked {
-		if b.started {
-			select {
-			case b.stopKeepCh <- struct{}{}:
-				<-b.keepStoppedCh
-			default:
-				// Already stopping or stopped
-			}
-		}
+	b.terminating = true
+	if b.started {
+		b.stopKeepCh <- struct{}{}
+		<-b.keepStoppedCh
+	}
+	if !b.StillLocked() {
 		return nil
 	}
-	b.locked = false
-	b.stopKeepCh <- struct{}{}
-	<-b.keepStoppedCh
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if err := b.redis.Delete(ctx, b.getRedisKey()); err != nil {
@@ -140,8 +142,12 @@ func (b *Bucket) Unlock() error {
 	return nil
 }
 
+func (b *Bucket) resetLock() {
+	b.lockedAt = time.Now().Add(-b.lockTTL)
+}
+
 func (b *Bucket) IsLocked() bool {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
-	return b.locked
+	return !b.terminating && b.StillLocked()
 }

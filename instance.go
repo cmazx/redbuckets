@@ -22,7 +22,7 @@ type Instance struct {
 	registerTimeout    time.Duration
 	unRegisterTimeout  time.Duration
 	rangeTimeout       time.Duration
-	registerPeriod     time.Duration
+	heartBeatPeriod    time.Duration
 	errorHandler       func(string)
 	debug              func(string)
 	lastInstanceIndex  int
@@ -34,12 +34,18 @@ type Instance struct {
 	redisPrefix        string
 	lastRegistration   time.Time
 	instanceMux        *sync.Mutex
+	initialUpdateDelay time.Duration
 }
 type Options func(*Instance)
 
 func WithDebug(debug func(string)) Options {
 	return func(i *Instance) {
 		i.debug = debug
+	}
+}
+func WithInitialUpdateDelay(d time.Duration) Options {
+	return func(i *Instance) {
+		i.initialUpdateDelay = d
 	}
 }
 func WithErrorHandler(errorHandler func(string)) Options {
@@ -51,7 +57,7 @@ func WithErrorHandler(errorHandler func(string)) Options {
 }
 func WithRegisterPeriod(registerPeriod time.Duration) Options {
 	return func(i *Instance) {
-		i.registerPeriod = registerPeriod
+		i.heartBeatPeriod = registerPeriod
 	}
 }
 func WithRegisterTimeout(registerTimeout time.Duration) Options {
@@ -85,6 +91,9 @@ func WithRedisPrefix(prefix string) Options {
 	}
 }
 
+const defaultRedisPrefix = "red-buckets"
+const defaultBucketsAmount = 1024
+
 func NewInstance(redis Redis, listKey string, options ...Options) (*Instance, error) {
 	if listKey == "" {
 		return nil, errors.New("list key couldn't be empty")
@@ -93,21 +102,22 @@ func NewInstance(redis Redis, listKey string, options ...Options) (*Instance, er
 		return nil, errors.New("redis couldn't be nil")
 	}
 	inst := &Instance{
-		redis:             redis,
-		listKey:           listKey,
-		id:                uuid.New().String(),
-		buckets:           make(map[uint16]*Bucket),
-		wg:                &sync.WaitGroup{},
-		errorHandler:      func(str string) {},
-		debug:             func(str string) {},
-		registerPeriod:    time.Second,
-		registerTimeout:   time.Second * 3,
-		unRegisterTimeout: time.Second * 10,
-		rangeTimeout:      time.Second * 3,
-		bucketLockTTL:     time.Second * 10,
-		bucketsTotalCount: 1024,
-		redisPrefix:       "red-buckets",
-		instanceMux:       &sync.Mutex{},
+		redis:              redis,
+		listKey:            listKey,
+		id:                 uuid.New().String(),
+		buckets:            make(map[uint16]*Bucket),
+		wg:                 &sync.WaitGroup{},
+		errorHandler:       func(str string) {},
+		debug:              func(str string) {},
+		heartBeatPeriod:    time.Second,
+		registerTimeout:    time.Second * 3, // timeout for registration request
+		initialUpdateDelay: time.Second,     // pause before update buckets to avoid a rebalance storm
+		unRegisterTimeout:  time.Second * 10,
+		rangeTimeout:       time.Second * 3, // redis zrange request timeout
+		bucketLockTTL:      time.Second * 10,
+		bucketsTotalCount:  defaultBucketsAmount,
+		redisPrefix:        defaultRedisPrefix,
+		instanceMux:        &sync.Mutex{},
 	}
 	for _, option := range options {
 		option(inst)
@@ -118,6 +128,9 @@ func NewInstance(redis Redis, listKey string, options ...Options) (*Instance, er
 	}
 	if inst.bucketsTotalCount%2 != 0 {
 		return nil, errors.New("bucket count must be even")
+	}
+	if inst.bucketsTotalCount < 1 {
+		return nil, errors.New("bucket count couldn't be less than 1")
 	}
 	if inst.bucketLockTTL < time.Second*2 {
 		return nil, errors.New("bucket lock ttl couldn't be less than 2 seconds")
@@ -135,7 +148,7 @@ func (i *Instance) LastRegistration() time.Time {
 	return i.lastRegistration
 }
 
-// Buckets returns a list of IDs for locked buckets and a function to release the read lock on the buckets map.
+// Buckets returns a list of IDs for lockedAt buckets and a function to release the read lock on the buckets map.
 func (i *Instance) Buckets() ([]uint16, func()) {
 	i.bucketsMux.RLock()
 
@@ -148,7 +161,7 @@ func (i *Instance) Buckets() ([]uint16, func()) {
 	return lockedBuckets, func() { i.bucketsMux.RUnlock() }
 }
 
-// BucketFulfillment returns the percentage of locked buckets
+// BucketFulfillment returns the percentage of lockedAt buckets
 // in case of no buckets assigned to instance returns -1
 func (i *Instance) BucketFulfillment() int {
 	i.bucketsMux.RLock()
@@ -202,6 +215,8 @@ func (i *Instance) Run(ctx context.Context) error {
 	i.lastRegistration = time.Now()
 	i.instanceMux.Unlock()
 
+	time.Sleep(i.initialUpdateDelay)
+
 	// Initial rebalance
 	i.update(ctx)
 	i.wg.Add(2)
@@ -218,7 +233,7 @@ func (i *Instance) Run(ctx context.Context) error {
 }
 
 func (i *Instance) updateRoutine(ctx context.Context) {
-	t := time.NewTicker(i.registerPeriod)
+	t := time.NewTicker(i.heartBeatPeriod)
 	defer t.Stop()
 loop:
 	for {
@@ -232,7 +247,7 @@ loop:
 }
 
 func (i *Instance) intanceRegistrationRoutine(ctx context.Context) {
-	t := time.NewTicker(i.registerPeriod)
+	t := time.NewTicker(i.heartBeatPeriod)
 	defer t.Stop()
 	for {
 		select {
@@ -347,7 +362,7 @@ func (i *Instance) BucketsState() map[uint16]bool {
 	defer i.bucketsMux.RUnlock()
 	list := make(map[uint16]bool)
 	for _, bucket := range i.buckets {
-		list[bucket.id] = bucket.locked
+		list[bucket.id] = bucket.StillLocked()
 	}
 	return list
 }
@@ -386,7 +401,7 @@ func (i *Instance) refreshInstances(ctx context.Context, lastInstanceIndex, last
 	instances, err := i.redis.ZRangeByScore(
 		ctx,
 		i.listKey,
-		strconv.FormatInt(time.Now().Add(-i.registerPeriod).Unix(), 10),
+		strconv.FormatInt(time.Now().Add(-i.heartBeatPeriod).Unix(), 10),
 		"+inf")
 	if err != nil {
 		i.errorHandler(fmt.Sprintf("check instance rebalance: %s", err.Error()))
