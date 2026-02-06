@@ -129,9 +129,6 @@ func NewInstance(redis Redis, listKey string, options ...Options) (*Instance, er
 	if inst.bucketsTotalCount%2 != 0 {
 		return nil, errors.New("bucket count must be even")
 	}
-	if inst.bucketsTotalCount < 1 {
-		return nil, errors.New("bucket count couldn't be less than 1")
-	}
 	if inst.bucketLockTTL < time.Second*2 {
 		return nil, errors.New("bucket lock ttl couldn't be less than 2 seconds")
 	}
@@ -279,7 +276,7 @@ func (i *Instance) update(ctx context.Context) {
 		return
 	}
 
-	rebalance, instanceIndex, instanceCount := i.refreshInstances(ctx, i.lastInstancesCount, i.lastInstancesCount)
+	rebalance, instanceIndex, instanceCount := i.refreshInstances(ctx, i.lastInstanceIndex, i.lastInstancesCount)
 	if rebalance {
 		i.rebalance(ctx, i.targetBuckets(instanceIndex, instanceCount))
 	}
@@ -362,7 +359,7 @@ func (i *Instance) BucketsState() map[uint16]bool {
 	defer i.bucketsMux.RUnlock()
 	list := make(map[uint16]bool)
 	for _, bucket := range i.buckets {
-		list[bucket.id] = bucket.StillLocked()
+		list[bucket.id] = bucket.IsLocked()
 	}
 	return list
 }

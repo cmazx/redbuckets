@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -58,13 +60,38 @@ func (m *RedisMock) ZRangeByScore(ctx context.Context, key string, minScore stri
 	if m.failZRange {
 		return nil, errors.New("ZRangeByScore failed")
 	}
+
+	var minVal float64
+	if minScore != "-inf" {
+		v, err := strconv.ParseFloat(minScore, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid minScore: %w", err)
+		}
+		minVal = v
+	} else {
+		minVal = -math.MaxFloat64
+	}
+
+	var maxVal float64
+	if maxScore != "+inf" {
+		v, err := strconv.ParseFloat(maxScore, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid maxScore: %w", err)
+		}
+		maxVal = v
+	} else {
+		maxVal = math.MaxFloat64
+	}
+
 	type item struct {
 		member string
 		score  float64
 	}
 	items := make([]item, 0, len(m.instances))
 	for member, score := range m.instances {
-		items = append(items, item{member: member, score: score})
+		if score >= minVal && score <= maxVal {
+			items = append(items, item{member: member, score: score})
+		}
 	}
 	slices.SortFunc(items, func(a, b item) int {
 		if a.score < b.score {
@@ -95,8 +122,10 @@ func (m *RedisMock) Expire(_ context.Context, key string, ttl time.Duration) err
 func (m *RedisMock) SetNxEx(ctx context.Context, key string, value string, ttl time.Duration) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, exists := m.keys[key]; exists {
-		return false, nil
+	if expireAt, exists := m.keys[key]; exists {
+		if expireAt.After(time.Now()) {
+			return false, nil
+		}
 	}
 	m.keys[key] = time.Now().Add(ttl)
 	return true, nil

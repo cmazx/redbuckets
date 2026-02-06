@@ -94,7 +94,7 @@ func (b *Bucket) lock() {
 }
 
 func (b *Bucket) StillLocked() bool {
-	return b.lockedAt.Before(time.Now().Add(-b.lockTTL))
+	return !b.lockedAt.IsZero() && time.Since(b.lockedAt) < b.lockTTL
 }
 func (b *Bucket) keep(ctx context.Context) {
 	b.mutex.Lock()
@@ -114,6 +114,7 @@ func (b *Bucket) keep(ctx context.Context) {
 		return
 	}
 
+	b.lockedAt = time.Now()
 	return
 }
 
@@ -125,12 +126,17 @@ func (b *Bucket) getRedisKey() string {
 // if lockAndKeep exited then keepStoppedCh is closed
 func (b *Bucket) Unlock() error {
 	b.mutex.Lock()
-	defer b.mutex.Unlock()
 	b.terminating = true
-	if b.started {
+	started := b.started
+	b.mutex.Unlock()
+
+	if started {
 		b.stopKeepCh <- struct{}{}
 		<-b.keepStoppedCh
 	}
+
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
 	if !b.StillLocked() {
 		return nil
 	}
@@ -140,10 +146,6 @@ func (b *Bucket) Unlock() error {
 		return fmt.Errorf("delete bucket lock key: %w", err)
 	}
 	return nil
-}
-
-func (b *Bucket) resetLock() {
-	b.lockedAt = time.Now().Add(-b.lockTTL)
 }
 
 func (b *Bucket) IsLocked() bool {

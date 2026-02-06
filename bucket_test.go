@@ -105,7 +105,7 @@ func TestBucketLock(t *testing.T) {
 		{
 			name: "lock already exists (retry)",
 			mockSetup: func(m *mockRedis) {
-				m.keyStore["red-bucket1"] = &redisValue{value: "red-bucket1", expireAt: time.Now().Add(time.Second * 10)}
+				m.keyStore["red1"] = &redisValue{value: "other-instance", expireAt: time.Now().Add(time.Second * 10)}
 				m.setNxExErr = nil
 			},
 			expectedError: nil,
